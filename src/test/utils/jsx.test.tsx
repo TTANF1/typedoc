@@ -1,5 +1,5 @@
 import { deepStrictEqual as equal } from "assert";
-import { JSX, renderElement, Raw } from "../../lib/utils";
+import { JSX, renderElement, Raw } from "../../lib/utils/index.js";
 
 describe("JSX", () => {
     it("Works with basic case", () => {
@@ -60,9 +60,9 @@ describe("JSX", () => {
                 <>
                     <div>A</div>
                     <div>B</div>
-                </>
+                </>,
             ),
-            "<div>A</div><div>B</div>"
+            "<div>A</div><div>B</div>",
         );
     });
 
@@ -75,11 +75,16 @@ describe("JSX", () => {
             renderElement(
                 <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
                     <path d="M 10,30" />
-                </svg>
+                </svg>,
             ),
             `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
                 <path d="M 10,30"></path>
-            </svg>`.replace(/^\s*|\r?\n/gm, "")
+            </svg>`.replace(/^\s*|\r?\n/gm, ""),
         );
+    });
+
+    it("Properly escapes quotes in html attributes", () => {
+        const quot = `test"quote`;
+        equal(renderElement(<div data-foo={quot} />), `<div data-foo="test&quot;quote"></div>`);
     });
 });

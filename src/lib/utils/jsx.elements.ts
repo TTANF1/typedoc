@@ -115,10 +115,21 @@ export interface IntrinsicElements {
 
     // SVG Elements
     svg: JsxSvgElementProps;
+    g: JsxGElementProps;
     path: JsxPathElementProps;
+    rect: JsxRectElementProps;
+    circle: JsxCircleElementProps;
+    ellipse: JsxEllipseElementProps;
+    polygon: JsxPolygonElementProps;
+    polyline: JsxPolylineElementProps;
+    line: JsxLineElementProps;
+    use: JsxUseElementProps;
+    text: JsxTextElementProps;
 }
 
-export const JsxFragment = Symbol();
+export function JsxFragment(): never {
+    throw new Error("Should never be called");
+}
 
 export type JsxComponent<P> = (props: P) => JsxElement | null | undefined;
 
@@ -166,12 +177,27 @@ export interface JsxHtmlGlobalProps {
     lang?: string;
     nonce?: string;
     part?: string;
+
+    role?: string;
     slot?: string;
     spellcheck?: boolean;
     style?: string;
     tabIndex?: number;
     title?: string;
     translate?: boolean;
+
+    // popover attributes
+    /**
+     * Default: 'auto'. true and 'auto' are equivalent
+     *
+     * See [MDN](https://developer.mozilla.org/en-US/docs/Web/API/Popover_API) for more details
+     */
+    popover?: boolean | "auto" | "manual";
+    /**
+     * It must be the popover element id, see [MDN](https://developer.mozilla.org/en-US/docs/Web/API/Popover_API)
+     */
+    popovertarget?: string;
+    popovertargetaction?: "hide" | "show" | "toggle";
 }
 
 /**
@@ -582,7 +608,7 @@ export interface JsxMetaElementProps extends JsxHtmlGlobalProps {
         | "default-style"
         | "x-ua-compatible"
         | "refresh";
-    charSet?: "utf-8";
+    charset?: "utf-8";
     content?: string;
     name?: string;
 }
@@ -933,9 +959,9 @@ export interface JsxSvgPresentationProps {
     "font-size"?: string;
     "font-size-adjust"?: "none" | number;
     "font-stretch"?: string;
-    "font-style"?: "normal" | "italic" | "oblique";
+    "font-style"?: "normal" | "italic" | "oblique" | string;
     "font-variant"?: string;
-    "font-weight"?: "normal" | "bold" | "bolder" | "lighter" | number;
+    "font-weight"?: "normal" | "bold" | "bolder" | "lighter" | number | string;
     "image-rendering"?: "auto" | "optimizeSpeed" | "optimizeQuality";
     "letter-spacing"?: string;
     "lighting-color"?: string;
@@ -1024,6 +1050,17 @@ export interface JsxSvgElementProps
 }
 
 /**
+ * Properties permitted on the `<g>` element.
+ *
+ * Reference: https://developer.mozilla.org/en-US/docs/Web/SVG/Element/g
+ */
+export interface JsxGElementProps
+    extends JsxSvgCoreProps,
+        JsxSvgStyleProps,
+        JsxSvgConditionalProcessingProps,
+        JsxSvgPresentationProps {}
+
+/**
  * Properties permitted on the `<path>` element.
  *
  * Reference: https://developer.mozilla.org/en-US/docs/Web/SVG/Element/path
@@ -1035,4 +1072,129 @@ export interface JsxPathElementProps
         JsxSvgPresentationProps {
     d: string;
     pathLength?: number;
+}
+
+/**
+ * Properties permitted on the `<rect>` element.
+ *
+ * Reference: https://developer.mozilla.org/en-US/docs/Web/SVG/Element/rect
+ */
+export interface JsxRectElementProps
+    extends JsxSvgCoreProps,
+        JsxSvgStyleProps,
+        JsxSvgConditionalProcessingProps,
+        JsxSvgPresentationProps {
+    height?: string | number;
+    pathLength?: number;
+    rx?: string | number;
+    ry?: string | number;
+    width?: string | number;
+    x?: string | number;
+    y?: string | number;
+}
+
+/**
+ * Properties permitted on the `<circle>` element.
+ *
+ * Reference: https://developer.mozilla.org/en-US/docs/Web/SVG/Element/circle
+ */
+export interface JsxCircleElementProps
+    extends JsxSvgCoreProps,
+        JsxSvgStyleProps,
+        JsxSvgConditionalProcessingProps,
+        JsxSvgPresentationProps {
+    cx?: string | number;
+    cy?: string | number;
+    r?: string | number;
+    pathLength?: number;
+}
+
+/**
+ * Properties permitted on the `<ellipse>` element.
+ *
+ * Reference: https://developer.mozilla.org/en-US/docs/Web/SVG/Element/ellipse
+ */
+export interface JsxEllipseElementProps
+    extends JsxSvgCoreProps,
+        JsxSvgStyleProps,
+        JsxSvgConditionalProcessingProps,
+        JsxSvgPresentationProps {
+    cx?: string | number;
+    cy?: string | number;
+    rx?: string | number;
+    ry?: string | number;
+    pathLength?: number;
+}
+
+/**
+ * Properties permitted on the `<polygon>` element.
+ *
+ * Reference: https://developer.mozilla.org/en-US/docs/Web/SVG/Element/polygon
+ */
+export interface JsxPolygonElementProps
+    extends JsxSvgCoreProps,
+        JsxSvgStyleProps,
+        JsxSvgConditionalProcessingProps,
+        JsxSvgPresentationProps {
+    points?: string;
+    pathLength?: number;
+}
+
+/** Properties permitted on the `<polyline>` element.
+ *
+ * Reference: https://developer.mozilla.org/en-US/docs/Web/SVG/Element/polyline
+ */
+export interface JsxPolylineElementProps
+    extends JsxSvgCoreProps,
+        JsxSvgStyleProps,
+        JsxSvgConditionalProcessingProps,
+        JsxSvgPresentationProps {
+    points?: string;
+    pathLength?: number;
+}
+
+/** Properties permitted on the `<line>` element.
+ *
+ * Reference: https://developer.mozilla.org/en-US/docs/Web/SVG/Element/line
+ */
+export interface JsxLineElementProps
+    extends JsxSvgCoreProps,
+        JsxSvgStyleProps,
+        JsxSvgConditionalProcessingProps,
+        JsxSvgPresentationProps {
+    x1?: string | number;
+    y1?: string | number;
+    x2?: string | number;
+    y2?: string | number;
+    pathLength?: number;
+}
+
+/**
+ * Properties permitted on the `<use>` element.
+ *
+ * Reference: https://developer.mozilla.org/en-US/docs/Web/SVG/Element/use
+ */
+export interface JsxUseElementProps
+    extends JsxSvgCoreProps,
+        JsxSvgStyleProps,
+        JsxSvgConditionalProcessingProps,
+        JsxSvgPresentationProps {
+    href: string;
+    x?: string | number;
+    y?: string | number;
+    width?: string | number;
+    height?: string | number;
+}
+
+/**
+ * Properties permitted on the `<text>` element.
+ *
+ * Reference: https://developer.mozilla.org/en-US/docs/Web/SVG/Element/text
+ */
+export interface JsxTextElementProps
+    extends JsxSvgCoreProps,
+        JsxSvgStyleProps,
+        JsxSvgPresentationProps {
+    x?: string | number;
+    y?: string | number;
 }

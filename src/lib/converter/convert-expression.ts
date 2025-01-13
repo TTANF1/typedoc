@@ -1,4 +1,4 @@
-import * as ts from "typescript";
+import ts from "typescript";
 
 /**
  * Return the default value of the given node.
@@ -7,7 +7,7 @@ import * as ts from "typescript";
  * @returns The default value as a string.
  */
 export function convertDefaultValue(
-    node: ts.Declaration | undefined
+    node: ts.Declaration | undefined,
 ): string | undefined {
     const anyNode = node as any;
     if (anyNode?.initializer) {
@@ -24,9 +24,16 @@ export function convertExpression(expression: ts.Expression): string {
         case ts.SyntaxKind.FalseKeyword:
         case ts.SyntaxKind.NullKeyword:
         case ts.SyntaxKind.NumericLiteral:
-        case ts.SyntaxKind.PrefixUnaryExpression:
+        case ts.SyntaxKind.BigIntLiteral:
         case ts.SyntaxKind.Identifier:
             return expression.getText();
+    }
+
+    if (ts.isPrefixUnaryExpression(expression)) {
+        const inner = convertExpression(expression.operand);
+        if (inner != "...") {
+            return expression.getText();
+        }
     }
 
     if (

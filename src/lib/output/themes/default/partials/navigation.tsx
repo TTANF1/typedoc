@@ -1,134 +1,235 @@
-import { ContainerReflection, DeclarationReflection, Reflection, ReflectionKind } from "../../../../models";
-import { JSX, partition } from "../../../../utils";
-import type { PageEvent } from "../../../events";
-import { classNames, wbr } from "../../lib";
-import type { DefaultThemeRenderContext } from "../DefaultThemeRenderContext";
+import { type Reflection, ReflectionFlag } from "../../../../models/index.js";
+import { JSX } from "../../../../utils/index.js";
+import type { PageEvent, PageHeading } from "../../../events.js";
+import { classNames, getDisplayName, wbr } from "../../lib.js";
+import type { DefaultThemeRenderContext } from "../DefaultThemeRenderContext.js";
 
-export function navigation(context: DefaultThemeRenderContext, props: PageEvent<Reflection>) {
+export function sidebar(context: DefaultThemeRenderContext, props: PageEvent<Reflection>) {
     return (
         <>
-            {primaryNavigation(context, props)}
-            {secondaryNavigation(context, props)}
+            {context.sidebarLinks()}
+            {context.navigation(props)}
         </>
     );
 }
 
-function primaryNavigation(context: DefaultThemeRenderContext, props: PageEvent<Reflection>) {
-    // Create the navigation for the current page:
-    // If there are modules marked as "external" then put them in their own group.
+function buildFilterItem(context: DefaultThemeRenderContext, name: string, displayName: string, defaultValue: boolean) {
+    return (
+        <li class="tsd-filter-item">
+            <label class="tsd-filter-input">
+                <input type="checkbox" id={`tsd-filter-${name}`} name={name} checked={defaultValue} />
+                {context.icons.checkbox()}
+                <span>{displayName}</span>
+            </label>
+        </li>
+    );
+}
 
-    const modules = props.model.project.getChildrenByKind(ReflectionKind.SomeModule);
-    const projectLinkName = modules.some((m) => m.kindOf(ReflectionKind.Module)) ? "Modules" : "Exports";
+export function sidebarLinks(context: DefaultThemeRenderContext) {
+    const links = Object.entries(context.options.getValue("sidebarLinks"));
+    const navLinks = Object.entries(context.options.getValue("navigationLinks"));
 
-    const [ext, int] = partition(modules, (m) => m.flags.isExternal);
+    if (!links.length && !navLinks.length) return null;
+    return (
+        <nav id="tsd-sidebar-links" class="tsd-navigation">
+            {links.map(([label, url]) => (
+                <a href={url}>{label}</a>
+            ))}
+            {navLinks.map(([label, url]) => (
+                <a href={url} class="tsd-nav-link">
+                    {label}
+                </a>
+            ))}
+        </nav>
+    );
+}
 
-    if (ext.length === 0) {
-        return (
-            <nav class="tsd-navigation primary">
-                <ul>
-                    <li class={classNames({ current: props.model.isProject() })}>
-                        <a href={context.urlTo(props.model.project)}>{projectLinkName}</a>
-                    </li>
-                    {int.map(link)}
-                </ul>
-            </nav>
-        );
+const flagOptionNameToReflectionFlag = {
+    protected: ReflectionFlag.Protected,
+    private: ReflectionFlag.Private,
+    external: ReflectionFlag.External,
+    inherited: ReflectionFlag.Inherited,
+};
+
+export function settings(context: DefaultThemeRenderContext) {
+    const defaultFilters = context.options.getValue("visibilityFilters") as Record<string, boolean>;
+
+    const visibilityOptions: JSX.Element[] = [];
+
+    for (const key of Object.keys(defaultFilters)) {
+        if (key.startsWith("@")) {
+            const filterName = key
+                .substring(1)
+                .replace(/([a-z])([A-Z])/g, "$1-$2")
+                .toLowerCase();
+
+            visibilityOptions.push(
+                buildFilterItem(
+                    context,
+                    filterName,
+                    context.internationalization.translateTagName(key as `@${string}`),
+                    defaultFilters[key],
+                ),
+            );
+        } else if (
+            (key === "protected" && !context.options.getValue("excludeProtected")) ||
+            (key === "private" && !context.options.getValue("excludePrivate")) ||
+            (key === "external" && !context.options.getValue("excludeExternals")) ||
+            key === "inherited"
+        ) {
+            visibilityOptions.push(
+                buildFilterItem(
+                    context,
+                    key,
+                    context.internationalization.flagString(flagOptionNameToReflectionFlag[key]),
+                    defaultFilters[key],
+                ),
+            );
+        }
     }
 
+    // Settings panel above navigation
+
     return (
-        <nav class="tsd-navigation primary">
-            <ul>
-                <li class={classNames({ current: props.model.isProject() })}>
-                    <a href={context.urlTo(props.model.project)}>{projectLinkName}</a>
-                </li>
-                <li class="label tsd-is-external">
-                    <span>Internals</span>
-                </li>
-                {int.map(link)}
-                <li class="label tsd-is-external">
-                    <span>Externals</span>
-                </li>
-                {ext.map(link)}
+        <div class="tsd-navigation settings">
+            <details class="tsd-accordion" open={false}>
+                <summary class="tsd-accordion-summary">
+                    <h3>
+                        {context.icons.chevronDown()}
+                        {context.i18n.theme_settings()}
+                    </h3>
+                </summary>
+                <div class="tsd-accordion-details">
+                    {visibilityOptions.length && (
+                        <div class="tsd-filter-visibility">
+                            <span class="settings-label">{context.i18n.theme_member_visibility()}</span>
+                            <ul id="tsd-filter-options">{...visibilityOptions}</ul>
+                        </div>
+                    )}
+                    <div class="tsd-theme-toggle">
+                        <label class="settings-label" for="tsd-theme">
+                            {context.i18n.theme_theme()}
+                        </label>
+                        <select id="tsd-theme">
+                            <option value="os">{context.i18n.theme_os()}</option>
+                            <option value="light">{context.i18n.theme_light()}</option>
+                            <option value="dark">{context.i18n.theme_dark()}</option>
+                        </select>
+                    </div>
+                </div>
+            </details>
+        </div>
+    );
+}
+
+export const navigation = function navigation(context: DefaultThemeRenderContext, props: PageEvent<Reflection>) {
+    return (
+        <nav class="tsd-navigation">
+            <a
+                href={context.urlTo(props.project)}
+                class={classNames({ current: props.url === props.model.url && props.model.isProject() })}
+            >
+                {getDisplayName(props.project)}
+            </a>
+            <ul class="tsd-small-nested-navigation" id="tsd-nav-container">
+                <li>{context.i18n.theme_loading()}</li>
             </ul>
         </nav>
     );
+};
 
-    function link(mod: DeclarationReflection) {
-        const current = inPath(mod, props.model);
-        let childNav: JSX.Element | undefined;
-        if (current) {
-            const childModules = mod.children?.filter((m) => m.kindOf(ReflectionKind.SomeModule));
-            if (childModules?.length) {
-                childNav = <ul>{childModules.map(link)}</ul>;
-            }
+export function pageSidebar(context: DefaultThemeRenderContext, props: PageEvent<Reflection>) {
+    return (
+        <>
+            {context.settings()}
+            {context.pageNavigation(props)}
+        </>
+    );
+}
+
+function buildSectionNavigation(context: DefaultThemeRenderContext, headings: PageHeading[]) {
+    const levels: JSX.Element[][] = [[]];
+
+    function finalizeLevel(finishedHandlingHeadings: boolean) {
+        const level = levels.pop()!;
+        if (levels[levels.length - 1].length === 0 && finishedHandlingHeadings) {
+            levels[levels.length - 1] = level;
+            return;
         }
 
-        return (
-            <li class={classNames({ current }) + " " + mod.cssClasses}>
-                <a href={context.urlTo(mod)}>{wbr(mod.name)}</a>
-                {childNav}
-            </li>
+        const built = (
+            <ul>
+                {level.map((l) => (
+                    <li>{l}</li>
+                ))}
+            </ul>
+        );
+        levels[levels.length - 1].push(built);
+    }
+
+    for (const heading of headings) {
+        const inferredLevel = heading.level
+            ? heading.level + 2 // regular heading
+            : heading.kind
+              ? 2 // reflection
+              : 1; // group/category
+        while (inferredLevel < levels.length) {
+            finalizeLevel(false);
+        }
+        while (inferredLevel > levels.length) {
+            // Lower level than before
+            levels.push([]);
+        }
+
+        levels[levels.length - 1].push(
+            <a href={heading.link} class={heading.classes}>
+                {heading.kind && context.icons[heading.kind]()}
+                <span>{wbr(heading.text)}</span>
+            </a>,
         );
     }
-}
 
-function secondaryNavigation(context: DefaultThemeRenderContext, props: PageEvent<Reflection>) {
-    const children = props.model instanceof ContainerReflection ? props.model.children || [] : [];
-
-    // Multiple entry points, and on main project page.
-    if (props.model.isProject() && props.model.getChildrenByKind(ReflectionKind.Module).length) {
-        return;
+    while (levels.length > 1) {
+        finalizeLevel(true);
     }
 
-    // TODO: TypeDoc 0.21 did special things here. If there were more than 40
-    // children of this page's parent, it only displayed this page's children.
-    // Otherwise, it displayed *everything*. For now, only display page children.
-    // It seems weird to do this according to a random hardcoded number. At the very
-    // least this should be added as a configurable flag, but maybe even the whole
-    // behavior should be configurable globally...
+    levels.unshift([]);
+    finalizeLevel(true);
+    return levels[0];
+}
 
-    const pageNavigation = (
-        <ul>
-            {children
-                .filter((child) => !child.kindOf(ReflectionKind.SomeModule))
-                .map((child) => {
-                    return (
-                        <li class={child.cssClasses}>
-                            <a href={context.urlTo(child)} class="tsd-kind-icon">
-                                {wbr(child.name)}
-                            </a>
-                        </li>
-                    );
-                })}
-        </ul>
-    );
+export function pageNavigation(context: DefaultThemeRenderContext, props: PageEvent<Reflection>) {
+    if (!props.pageSections.some((sect) => sect.headings.length)) {
+        return <></>;
+    }
 
-    if (props.model.kindOf(ReflectionKind.SomeModule | ReflectionKind.Project)) {
-        return <nav class="tsd-navigation secondary menu-sticky">{pageNavigation}</nav>;
+    const sections: JSX.Children = [];
+
+    for (const section of props.pageSections) {
+        if (section.title) {
+            sections.push(
+                <details open class="tsd-accordion tsd-page-navigation-section">
+                    <summary class="tsd-accordion-summary" data-key={`section-${section.title}`}>
+                        {context.icons.chevronDown()}
+                        {section.title}
+                    </summary>
+                    <div>{buildSectionNavigation(context, section.headings)}</div>
+                </details>,
+            );
+        } else {
+            sections.push(buildSectionNavigation(context, section.headings));
+        }
     }
 
     return (
-        <nav class="tsd-navigation secondary menu-sticky">
-            <ul>
-                <li class={"current " + props.model.cssClasses}>
-                    <a href={context.urlTo(props.model)} class="tsd-kind-icon">
-                        {wbr(props.model.name)}
-                    </a>
-                    {pageNavigation}
-                </li>
-            </ul>
-        </nav>
+        <details open={true} class="tsd-accordion tsd-page-navigation">
+            <summary class="tsd-accordion-summary">
+                <h3>
+                    {context.icons.chevronDown()}
+                    {context.i18n.theme_on_this_page()}
+                </h3>
+            </summary>
+            <div class="tsd-accordion-details">{sections}</div>
+        </details>
     );
-}
-
-function inPath(thisPage: Reflection, toCheck: Reflection | undefined): boolean {
-    while (toCheck) {
-        if (toCheck.isProject()) return false;
-
-        if (thisPage === toCheck) return true;
-
-        toCheck = toCheck.parent;
-    }
-
-    return false;
 }

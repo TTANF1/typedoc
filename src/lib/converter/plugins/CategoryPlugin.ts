@@ -1,75 +1,80 @@
+import assert from "assert";
+import { ApplicationEvents } from "../../application-events.js";
 import {
-    Reflection,
+    Comment,
     ContainerReflection,
-    DeclarationReflection,
-    CommentTag,
-} from "../../models";
-import { ReflectionCategory } from "../../models/ReflectionCategory";
-import { Component, ConverterComponent } from "../components";
-import { Converter } from "../converter";
-import type { Context } from "../context";
-import { BindOption } from "../../utils";
-import type { Comment } from "../../models/comments/index";
+    ReflectionCategory,
+    ReflectionKind,
+    type DeclarationReflection,
+    type DocumentReflection,
+    type ProjectReflection,
+} from "../../models/index.js";
+import { Option, getSortFunction } from "../../utils/index.js";
+import { ConverterComponent } from "../components.js";
+import type { Context } from "../context.js";
+import { ConverterEvents } from "../converter-events.js";
+import type { Converter } from "../converter.js";
 
 /**
  * A handler that sorts and categorizes the found reflections in the resolving phase.
  *
  * The handler sets the ´category´ property of all reflections.
  */
-@Component({ name: "category" })
 export class CategoryPlugin extends ConverterComponent {
-    @BindOption("defaultCategory")
-    defaultCategory!: string;
+    sortFunction!: (
+        reflections: Array<DeclarationReflection | DocumentReflection>,
+    ) => void;
 
-    @BindOption("categoryOrder")
-    categoryOrder!: string[];
+    @Option("defaultCategory")
+    accessor defaultCategory!: string;
 
-    @BindOption("categorizeByGroup")
-    categorizeByGroup!: boolean;
+    @Option("categoryOrder")
+    accessor categoryOrder!: string[];
+
+    @Option("categorizeByGroup")
+    accessor categorizeByGroup!: boolean;
 
     // For use in static methods
     static defaultCategory = "Other";
     static WEIGHTS: string[] = [];
 
-    /**
-     * Create a new CategoryPlugin instance.
-     */
-    override initialize() {
-        this.listenTo(
-            this.owner,
-            {
-                [Converter.EVENT_BEGIN]: this.onBegin,
-                [Converter.EVENT_RESOLVE]: this.onResolve,
-                [Converter.EVENT_RESOLVE_END]: this.onEndResolve,
-            },
-            undefined,
-            -200
+    constructor(owner: Converter) {
+        super(owner);
+        this.owner.on(
+            ConverterEvents.RESOLVE_END,
+            this.onEndResolve.bind(this),
+            -200,
         );
+        this.application.on(
+            ApplicationEvents.REVIVE,
+            this.onRevive.bind(this),
+            -200,
+        );
+    }
+
+    private onRevive(project: ProjectReflection) {
+        this.setup();
+
+        this.categorize(project);
+        for (const refl of project.getReflectionsByKind(
+            ReflectionKind.SomeModule,
+        )) {
+            assert(refl.isDeclaration());
+            this.categorize(refl);
+        }
     }
 
     /**
      * Triggered when the converter begins converting a project.
      */
-    private onBegin(_context: Context) {
+    private setup() {
+        this.sortFunction = getSortFunction(this.application.options);
+
         // Set up static properties
         if (this.defaultCategory) {
             CategoryPlugin.defaultCategory = this.defaultCategory;
         }
-        if (this.categoryOrder) {
-            CategoryPlugin.WEIGHTS = this.categoryOrder;
-        }
-    }
-
-    /**
-     * Triggered when the converter resolves a reflection.
-     *
-     * @param context  The context object describing the current state the converter is in.
-     * @param reflection  The reflection that is currently resolved.
-     */
-    private onResolve(_context: Context, reflection: Reflection) {
-        if (reflection instanceof ContainerReflection) {
-            this.categorize(reflection);
-        }
+        CategoryPlugin.WEIGHTS = this.categoryOrder;
     }
 
     /**
@@ -78,8 +83,17 @@ export class CategoryPlugin extends ConverterComponent {
      * @param context  The context object describing the current state the converter is in.
      */
     private onEndResolve(context: Context) {
+        this.setup();
+
         const project = context.project;
         this.categorize(project);
+
+        for (const id in project.reflections) {
+            const reflection = project.reflections[id];
+            if (reflection instanceof ContainerReflection) {
+                this.categorize(reflection);
+            }
+        }
     }
 
     private categorize(obj: ContainerReflection) {
@@ -97,10 +111,11 @@ export class CategoryPlugin extends ConverterComponent {
         obj.groups.forEach((group) => {
             if (group.categories) return;
 
-            group.categories = CategoryPlugin.getReflectionCategories(
-                group.children
+            group.categories = this.getReflectionCategories(
+                obj,
+                group.children,
             );
-            if (group.categories && group.categories.length > 1) {
+            if (group.categories.length > 1) {
                 group.categories.sort(CategoryPlugin.sortCatCallback);
             } else if (
                 group.categories.length === 1 &&
@@ -113,11 +128,14 @@ export class CategoryPlugin extends ConverterComponent {
     }
 
     private lumpCategorize(obj: ContainerReflection) {
-        if (!obj.children || obj.children.length === 0 || obj.categories) {
+        if (!obj.childrenIncludingDocuments || obj.categories) {
             return;
         }
-        obj.categories = CategoryPlugin.getReflectionCategories(obj.children);
-        if (obj.categories && obj.categories.length > 1) {
+        obj.categories = this.getReflectionCategories(
+            obj,
+            obj.childrenIncludingDocuments,
+        );
+        if (obj.categories.length > 1) {
             obj.categories.sort(CategoryPlugin.sortCatCallback);
         } else if (
             obj.categories.length === 1 &&
@@ -134,91 +152,57 @@ export class CategoryPlugin extends ConverterComponent {
      * @param reflections  The reflections that should be categorized.
      * @returns An array containing all children of the given reflection categorized
      */
-    static getReflectionCategories(
-        reflections: DeclarationReflection[]
+    private getReflectionCategories(
+        parent: ContainerReflection,
+        reflections: Array<DeclarationReflection | DocumentReflection>,
     ): ReflectionCategory[] {
-        const categories: ReflectionCategory[] = [];
-        let defaultCat: ReflectionCategory | undefined;
-        reflections.forEach((child) => {
+        const categories = new Map<string, ReflectionCategory>();
+
+        for (const child of reflections) {
             const childCategories = CategoryPlugin.getCategories(child);
             if (childCategories.size === 0) {
-                if (!defaultCat) {
-                    defaultCat = categories.find(
-                        (category) =>
-                            category.title === CategoryPlugin.defaultCategory
-                    );
-                    if (!defaultCat) {
-                        defaultCat = new ReflectionCategory(
-                            CategoryPlugin.defaultCategory
-                        );
-                        categories.push(defaultCat);
-                    }
-                }
-                defaultCat.children.push(child);
-                return;
+                childCategories.add(CategoryPlugin.defaultCategory);
             }
+
             for (const childCat of childCategories) {
-                let category = categories.find((cat) => cat.title === childCat);
+                const category = categories.get(childCat);
+
                 if (category) {
                     category.children.push(child);
-                    continue;
-                }
-                category = new ReflectionCategory(childCat);
-                category.children.push(child);
-                categories.push(category);
-            }
-        });
-        return categories;
-    }
-
-    /**
-     * Return the category of a given reflection.
-     *
-     * @param reflection The reflection.
-     * @returns The category the reflection belongs to
-     */
-    static getCategories(reflection: DeclarationReflection) {
-        function extractCategoryTag(comment: Comment | undefined) {
-            const categories = new Set<string>();
-            if (!comment) return categories;
-
-            const tags = comment.tags;
-            const commentTags: CommentTag[] = [];
-            tags.forEach((tag) => {
-                if (tag.tagName !== "category") {
-                    commentTags.push(tag);
-                    return;
-                }
-                const text = tag.text.trim();
-                if (!text) {
-                    return;
-                }
-                categories.add(text);
-            });
-            comment.tags = commentTags;
-            return categories;
-        }
-
-        let categories = new Set<string>();
-
-        if (reflection.comment) {
-            categories = extractCategoryTag(reflection.comment);
-        } else if (reflection.signatures) {
-            for (const sig of reflection.signatures) {
-                for (const cat of extractCategoryTag(sig.comment)) {
-                    categories.add(cat);
+                } else {
+                    const cat = new ReflectionCategory(childCat);
+                    cat.children.push(child);
+                    categories.set(childCat, cat);
                 }
             }
         }
 
-        if (reflection.type?.type === "reflection") {
-            reflection.type.declaration.comment?.removeTags("category");
-            reflection.type.declaration.signatures?.forEach((s) =>
-                s.comment?.removeTags("category")
-            );
+        if (parent.comment) {
+            for (const tag of parent.comment.blockTags) {
+                if (tag.tag === "@categoryDescription") {
+                    const { header, body } = Comment.splitPartsToHeaderAndBody(
+                        tag.content,
+                    );
+                    const cat = categories.get(header);
+                    if (cat) {
+                        cat.description = body;
+                    } else {
+                        this.application.logger.warn(
+                            this.application.i18n.comment_for_0_includes_categoryDescription_for_1_but_no_child_in_group(
+                                parent.getFriendlyFullName(),
+                                header,
+                            ),
+                        );
+                    }
+                }
+            }
         }
 
-        return categories;
+        for (const cat of categories.values()) {
+            this.sortFunction(cat.children);
+        }
+
+        return Array.from(categories.values());
     }
 
     /**
@@ -228,9 +212,9 @@ export class CategoryPlugin extends ConverterComponent {
      * @param b The right reflection to sort.
      * @returns The sorting weight.
      */
-    static sortCatCallback(
+    private static sortCatCallback(
         a: ReflectionCategory,
-        b: ReflectionCategory
+        b: ReflectionCategory,
     ): number {
         let aWeight = CategoryPlugin.WEIGHTS.indexOf(a.title);
         let bWeight = CategoryPlugin.WEIGHTS.indexOf(b.title);
@@ -250,5 +234,43 @@ export class CategoryPlugin extends ConverterComponent {
             return a.title > b.title ? 1 : -1;
         }
         return aWeight - bWeight;
+    }
+
+    static getCategories(
+        reflection: DeclarationReflection | DocumentReflection,
+    ) {
+        const categories = new Set<string>();
+        function discoverCategories(comment: Comment | undefined) {
+            if (!comment) return;
+            for (const tag of comment.blockTags) {
+                if (tag.tag === "@category") {
+                    categories.add(
+                        Comment.combineDisplayParts(tag.content).trim(),
+                    );
+                }
+            }
+        }
+
+        discoverCategories(reflection.comment);
+        if (reflection.isDeclaration()) {
+            for (const sig of reflection.getNonIndexSignatures()) {
+                discoverCategories(sig.comment);
+            }
+
+            if (reflection.type?.type === "reflection") {
+                discoverCategories(reflection.type.declaration.comment);
+                for (const sig of reflection.type.declaration.getNonIndexSignatures()) {
+                    discoverCategories(sig.comment);
+                }
+            }
+        }
+
+        if (reflection.isDocument() && "category" in reflection.frontmatter) {
+            categories.add(String(reflection.frontmatter["category"]));
+        }
+
+        categories.delete("");
+
+        return categories;
     }
 }

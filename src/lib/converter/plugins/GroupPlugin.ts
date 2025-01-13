@@ -1,69 +1,79 @@
 import {
-    Reflection,
     ReflectionKind,
     ContainerReflection,
-    DeclarationReflection,
-} from "../../models/reflections/index";
-import { ReflectionGroup } from "../../models/ReflectionGroup";
-import type { SourceDirectory } from "../../models/sources/directory";
-import { Component, ConverterComponent } from "../components";
-import { Converter } from "../converter";
-import type { Context } from "../context";
-import { sortReflections, SortStrategy } from "../../utils/sort";
-import { BindOption } from "../../utils";
+    type DeclarationReflection,
+    type DocumentReflection,
+    ReferenceReflection,
+    type ProjectReflection,
+} from "../../models/reflections/index.js";
+import { ReflectionGroup } from "../../models/ReflectionGroup.js";
+import { ConverterComponent } from "../components.js";
+import type { Context } from "../context.js";
+import { getSortFunction } from "../../utils/sort.js";
+import { Option } from "../../utils/index.js";
+import { Comment } from "../../models/index.js";
+import { ConverterEvents } from "../converter-events.js";
+import type { Converter } from "../converter.js";
+import { ApplicationEvents } from "../../application-events.js";
+import assert from "assert";
+import type { Internationalization } from "../../internationalization/index.js";
+
+// Same as the defaultKindSortOrder in sort.ts
+const defaultGroupOrder = [
+    ReflectionKind.Document,
+    // project is never a child so never added to a group
+    ReflectionKind.Module,
+    ReflectionKind.Namespace,
+    ReflectionKind.Enum,
+    ReflectionKind.EnumMember,
+    ReflectionKind.Class,
+    ReflectionKind.Interface,
+    ReflectionKind.TypeAlias,
+
+    ReflectionKind.Constructor,
+    ReflectionKind.Property,
+    ReflectionKind.Variable,
+    ReflectionKind.Function,
+    ReflectionKind.Accessor,
+    ReflectionKind.Method,
+
+    ReflectionKind.Reference,
+    // others are never added to groups
+];
 
 /**
  * A handler that sorts and groups the found reflections in the resolving phase.
  *
- * The handler sets the ´groups´ property of all reflections.
+ * The handler sets the `groups` property of all container reflections.
  */
-@Component({ name: "group" })
 export class GroupPlugin extends ConverterComponent {
-    /**
-     * Define the singular name of individual reflection kinds.
-     */
-    static SINGULARS = {
-        [ReflectionKind.Enum]: "Enumeration",
-        [ReflectionKind.EnumMember]: "Enumeration member",
-    };
+    sortFunction!: (
+        reflections: Array<DeclarationReflection | DocumentReflection>,
+    ) => void;
 
-    /**
-     * Define the plural name of individual reflection kinds.
-     */
-    static PLURALS = {
-        [ReflectionKind.Class]: "Classes",
-        [ReflectionKind.Property]: "Properties",
-        [ReflectionKind.Enum]: "Enumerations",
-        [ReflectionKind.EnumMember]: "Enumeration members",
-        [ReflectionKind.TypeAlias]: "Type aliases",
-    };
+    @Option("groupOrder")
+    accessor groupOrder!: string[];
 
-    /** @internal */
-    @BindOption("sort")
-    sortStrategies!: SortStrategy[];
+    @Option("sortEntryPoints")
+    accessor sortEntryPoints!: boolean;
 
-    /**
-     * Create a new GroupPlugin instance.
-     */
-    override initialize() {
-        this.listenTo(this.owner, {
-            [Converter.EVENT_RESOLVE]: this.onResolve,
-            [Converter.EVENT_RESOLVE_END]: this.onEndResolve,
-        });
-    }
+    @Option("groupReferencesByType")
+    accessor groupReferencesByType!: boolean;
 
-    /**
-     * Triggered when the converter resolves a reflection.
-     *
-     * @param context  The context object describing the current state the converter is in.
-     * @param reflection  The reflection that is currently resolved.
-     */
-    private onResolve(_context: Context, reflection: Reflection) {
-        reflection.kindString = GroupPlugin.getKindSingular(reflection.kind);
+    static WEIGHTS: string[] = [];
 
-        if (reflection instanceof ContainerReflection) {
-            this.group(reflection);
-        }
+    constructor(owner: Converter) {
+        super(owner);
+        this.owner.on(
+            ConverterEvents.RESOLVE_END,
+            this.onEndResolve.bind(this),
+            -100,
+        );
+        this.application.on(
+            ApplicationEvents.REVIVE,
+            this.onRevive.bind(this),
+            -100,
+        );
     }
 
     /**
@@ -72,36 +82,129 @@ export class GroupPlugin extends ConverterComponent {
      * @param context  The context object describing the current state the converter is in.
      */
     private onEndResolve(context: Context) {
-        function walkDirectory(directory: SourceDirectory) {
-            directory.groups = GroupPlugin.getReflectionGroups(
-                directory.getAllReflections()
-            );
+        this.setup();
+        this.group(context.project);
 
-            for (const dir of Object.values(directory.directories)) {
-                walkDirectory(dir);
+        for (const id in context.project.reflections) {
+            const reflection = context.project.reflections[id];
+            if (reflection instanceof ContainerReflection) {
+                this.group(reflection);
             }
         }
+    }
 
-        const project = context.project;
+    private onRevive(project: ProjectReflection) {
+        this.setup();
         this.group(project);
+        for (const refl of project.getReflectionsByKind(
+            ReflectionKind.SomeModule,
+        )) {
+            assert(refl.isDeclaration());
+            this.group(refl);
+        }
+    }
 
-        walkDirectory(project.directory);
-        project.files.forEach((file) => {
-            file.groups = GroupPlugin.getReflectionGroups(file.reflections);
-        });
+    private setup() {
+        this.sortFunction = getSortFunction(this.application.options);
+        GroupPlugin.WEIGHTS = this.groupOrder;
+        if (GroupPlugin.WEIGHTS.length === 0) {
+            GroupPlugin.WEIGHTS = defaultGroupOrder.map((kind) =>
+                this.application.internationalization.kindPluralString(kind),
+            );
+        }
     }
 
     private group(reflection: ContainerReflection) {
-        if (
-            reflection.children &&
-            reflection.children.length > 0 &&
-            !reflection.groups
-        ) {
-            sortReflections(reflection.children, this.sortStrategies);
-            reflection.groups = GroupPlugin.getReflectionGroups(
-                reflection.children
+        if (reflection.childrenIncludingDocuments && !reflection.groups) {
+            if (reflection.children) {
+                if (
+                    this.sortEntryPoints ||
+                    !reflection.children.some((c) =>
+                        c.kindOf(ReflectionKind.Module),
+                    )
+                ) {
+                    this.sortFunction(reflection.children);
+                    this.sortFunction(reflection.documents || []);
+                    this.sortFunction(reflection.childrenIncludingDocuments);
+                }
+            } else if (reflection.documents) {
+                this.sortFunction(reflection.documents);
+                this.sortFunction(reflection.childrenIncludingDocuments);
+            }
+
+            reflection.groups = this.getReflectionGroups(
+                reflection,
+                reflection.childrenIncludingDocuments,
             );
         }
+    }
+
+    /**
+     * Extracts the groups for a given reflection.
+     *
+     * @privateRemarks
+     * If you change this, also update extractCategories in CategoryPlugin accordingly.
+     */
+    getGroups(reflection: DeclarationReflection | DocumentReflection) {
+        return GroupPlugin.getGroups(
+            reflection,
+            this.groupReferencesByType,
+            this.application.internationalization,
+        );
+    }
+
+    static getGroups(
+        reflection: DeclarationReflection | DocumentReflection,
+        groupReferencesByType: boolean,
+        internationalization: Internationalization,
+    ) {
+        const groups = new Set<string>();
+        function extractGroupTags(comment: Comment | undefined) {
+            if (!comment) return;
+            for (const tag of comment.blockTags) {
+                if (tag.tag === "@group") {
+                    groups.add(Comment.combineDisplayParts(tag.content).trim());
+                }
+            }
+        }
+
+        if (reflection.isDeclaration()) {
+            extractGroupTags(reflection.comment);
+            for (const sig of reflection.getNonIndexSignatures()) {
+                extractGroupTags(sig.comment);
+            }
+
+            if (reflection.type?.type === "reflection") {
+                extractGroupTags(reflection.type.declaration.comment);
+                for (const sig of reflection.type.declaration.getNonIndexSignatures()) {
+                    extractGroupTags(sig.comment);
+                }
+            }
+        }
+
+        if (reflection.isDocument() && "group" in reflection.frontmatter) {
+            groups.add(String(reflection.frontmatter["group"]));
+        }
+
+        groups.delete("");
+        if (groups.size === 0) {
+            if (
+                reflection instanceof ReferenceReflection &&
+                groupReferencesByType
+            ) {
+                groups.add(
+                    internationalization.kindPluralString(
+                        reflection.getTargetReflectionDeep().kind,
+                    ),
+                );
+            } else {
+                groups.add(
+                    internationalization.kindPluralString(reflection.kind),
+                );
+            }
+        }
+
+        return groups;
     }
 
     /**
@@ -112,102 +215,69 @@ export class GroupPlugin extends ConverterComponent {
      * @param reflections  The reflections that should be grouped.
      * @returns An array containing all children of the given reflection grouped by their kind.
      */
-    static getReflectionGroups(
-        reflections: DeclarationReflection[]
+    getReflectionGroups(
+        parent: ContainerReflection,
+        reflections: Array<DeclarationReflection | DocumentReflection>,
     ): ReflectionGroup[] {
-        const groups: ReflectionGroup[] = [];
+        const groups = new Map<string, ReflectionGroup>();
+
         reflections.forEach((child) => {
-            for (let i = 0; i < groups.length; i++) {
-                const group = groups[i];
-                if (group.kind !== child.kind) {
-                    continue;
+            for (const name of this.getGroups(child)) {
+                let group = groups.get(name);
+                if (!group) {
+                    group = new ReflectionGroup(name, child);
+                    groups.set(name, group);
                 }
 
                 group.children.push(child);
-                return;
             }
-
-            const group = new ReflectionGroup(
-                GroupPlugin.getKindPlural(child.kind),
-                child.kind
-            );
-            group.children.push(child);
-            groups.push(group);
         });
 
-        groups.forEach((group) => {
-            let allInherited = true;
-            let allPrivate = true;
-            let allProtected = true;
-            let allExternal = true;
-
-            group.children.forEach((child) => {
-                allPrivate = child.flags.isPrivate && allPrivate;
-                allProtected =
-                    (child.flags.isPrivate || child.flags.isProtected) &&
-                    allProtected;
-                allExternal = child.flags.isExternal && allExternal;
-
-                if (child instanceof DeclarationReflection) {
-                    allInherited = !!child.inheritedFrom && allInherited;
-                } else {
-                    allInherited = false;
+        if (parent.comment) {
+            for (const tag of parent.comment.blockTags) {
+                if (tag.tag === "@groupDescription") {
+                    const { header, body } = Comment.splitPartsToHeaderAndBody(
+                        tag.content,
+                    );
+                    const cat = groups.get(header);
+                    if (cat) {
+                        cat.description = body;
+                    } else {
+                        this.application.logger.warn(
+                            this.application.i18n.comment_for_0_includes_groupDescription_for_1_but_no_child_in_group(
+                                parent.getFriendlyFullName(),
+                                header,
+                            ),
+                        );
+                    }
                 }
-            });
-
-            group.allChildrenAreInherited = allInherited;
-            group.allChildrenArePrivate = allPrivate;
-            group.allChildrenAreProtectedOrPrivate = allProtected;
-            group.allChildrenAreExternal = allExternal;
-        });
-
-        return groups;
-    }
-
-    /**
-     * Transform the internal typescript kind identifier into a human readable version.
-     *
-     * @param kind  The original typescript kind identifier.
-     * @returns A human readable version of the given typescript kind identifier.
-     */
-    private static getKindString(kind: ReflectionKind): string {
-        let str = ReflectionKind[kind];
-        str = str.replace(
-            /(.)([A-Z])/g,
-            (_m, a, b) => a + " " + b.toLowerCase()
-        );
-        return str;
-    }
-
-    /**
-     * Return the singular name of a internal typescript kind identifier.
-     *
-     * @param kind The original internal typescript kind identifier.
-     * @returns The singular name of the given internal typescript kind identifier
-     */
-    static getKindSingular(kind: ReflectionKind): string {
-        if (kind in GroupPlugin.SINGULARS) {
-            return GroupPlugin.SINGULARS[
-                kind as keyof typeof GroupPlugin.SINGULARS
-            ];
-        } else {
-            return GroupPlugin.getKindString(kind);
+            }
         }
+
+        return Array.from(groups.values()).sort(GroupPlugin.sortGroupCallback);
     }
 
     /**
-     * Return the plural name of a internal typescript kind identifier.
-     *
-     * @param kind The original internal typescript kind identifier.
-     * @returns The plural name of the given internal typescript kind identifier
+     * Callback used to sort groups by name.
      */
-    static getKindPlural(kind: ReflectionKind): string {
-        if (kind in GroupPlugin.PLURALS) {
-            return GroupPlugin.PLURALS[
-                kind as keyof typeof GroupPlugin.PLURALS
-            ];
-        } else {
-            return this.getKindString(kind) + "s";
+    static sortGroupCallback(a: ReflectionGroup, b: ReflectionGroup): number {
+        let aWeight = GroupPlugin.WEIGHTS.indexOf(a.title);
+        let bWeight = GroupPlugin.WEIGHTS.indexOf(b.title);
+        if (aWeight === -1 || bWeight === -1) {
+            let asteriskIndex = GroupPlugin.WEIGHTS.indexOf("*");
+            if (asteriskIndex === -1) {
+                asteriskIndex = GroupPlugin.WEIGHTS.length;
+            }
+            if (aWeight === -1) {
+                aWeight = asteriskIndex;
+            }
+            if (bWeight === -1) {
+                bWeight = asteriskIndex;
+            }
         }
+        if (aWeight === bWeight) {
+            return a.title > b.title ? 1 : -1;
+        }
+        return aWeight - bWeight;
     }
 }

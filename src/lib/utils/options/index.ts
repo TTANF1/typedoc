@@ -1,7 +1,17 @@
-export { Options, BindOption } from "./options";
-export type { OptionsReader } from "./options";
-export { ArgumentsReader, TypeDocReader, TSConfigReader } from "./readers";
-export { EmitStrategy, ParameterType, ParameterHint } from "./declaration";
+export { Options, Option } from "./options.js";
+export type { OptionsReader } from "./options.js";
+export {
+    ArgumentsReader,
+    PackageJsonReader,
+    TypeDocReader,
+    TSConfigReader,
+} from "./readers/index.js";
+export {
+    CommentStyle,
+    EmitStrategy,
+    ParameterType,
+    ParameterHint,
+} from "./declaration.js";
 
 export type {
     TypeDocOptions,
@@ -15,9 +25,15 @@ export type {
     BooleanDeclarationOption,
     ArrayDeclarationOption,
     MixedDeclarationOption,
+    ObjectDeclarationOption,
     MapDeclarationOption,
     FlagsDeclarationOption,
     DeclarationOptionToOptionType,
     TypeDocOptionValues,
     ParameterTypeToOptionTypeMap,
-} from "./declaration";
+    ManuallyValidatedOption,
+    JsDocCompatibility,
+    OutputSpecification,
+} from "./declaration.js";
+
+export * as OptionDefaults from "./defaults.js";

@@ -1,40 +1,42 @@
 {
   "id": 0,
-  "name": "typedoc",
+  "name": "declaration",
+  "variant": "project",
   "kind": 1,
   "flags": {},
   "children": [
     {
       "id": 1,
       "name": "declaration",
+      "variant": "declaration",
       "kind": 2,
-      "kindString": "Module",
       "flags": {},
       "children": [
         {
           "id": 2,
           "name": "Decl",
+          "variant": "declaration",
           "kind": 128,
-          "kindString": "Class",
           "flags": {},
           "children": [
             {
               "id": 3,
               "name": "constructor",
+              "variant": "declaration",
               "kind": 512,
-              "kindString": "Constructor",
               "flags": {},
               "signatures": [
                 {
                   "id": 4,
-                  "name": "new Decl",
+                  "name": "Decl",
+                  "variant": "signature",
                   "kind": 16384,
-                  "kindString": "Constructor signature",
                   "flags": {},
                   "type": {
                     "type": "reference",
-                    "id": 2,
-                    "name": "Decl"
+                    "target": 2,
+                    "name": "Decl",
+                    "package": "typedoc"
                   }
                 }
               ]
@@ -42,9 +44,17 @@
             {
               "id": 5,
               "name": "prop",
+              "variant": "declaration",
               "kind": 1024,
-              "kindString": "Property",
               "flags": {},
+              "sources": [
+                {
+                  "fileName": "declaration.d.ts",
+                  "line": 2,
+                  "character": 4,
+                  "url": "typedoc://declaration.d.ts#L2"
+                }
+              ],
               "type": {
                 "type": "intrinsic",
                 "name": "number"
@@ -54,26 +64,42 @@
           "groups": [
             {
               "title": "Constructors",
-              "kind": 512,
               "children": [
                 3
               ]
             },
             {
               "title": "Properties",
-              "kind": 1024,
               "children": [
                 5
               ]
+            }
+          ],
+          "sources": [
+            {
+              "fileName": "declaration.d.ts",
+              "line": 1,
+              "character": 21,
+              "url": "typedoc://declaration.d.ts#L1"
             }
           ]
         },
         {
           "id": 6,
           "name": "x",
+          "variant": "declaration",
           "kind": 32,
-          "kindString": "Variable",
-          "flags": {},
+          "flags": {
+            "isConst": true
+          },
+          "sources": [
+            {
+              "fileName": "declaration.d.ts",
+              "line": 5,
+              "character": 21,
+              "url": "typedoc://declaration.d.ts#L5"
+            }
+          ],
           "type": {
             "type": "intrinsic",
             "name": "number"
@@ -83,51 +109,58 @@
       "groups": [
         {
           "title": "Classes",
-          "kind": 128,
           "children": [
             2
           ]
         },
         {
           "title": "Variables",
-          "kind": 32,
           "children": [
             6
           ]
+        }
+      ],
+      "sources": [
+        {
+          "fileName": "declaration.d.ts",
+          "line": 1,
+          "character": 0,
+          "url": "typedoc://declaration.d.ts#L1"
         }
       ]
     },
     {
       "id": 7,
       "name": "export-declaration",
+      "variant": "declaration",
       "kind": 2,
-      "kindString": "Module",
       "flags": {},
       "children": [
         {
           "id": 8,
           "name": "Exported",
+          "variant": "declaration",
           "kind": 128,
-          "kindString": "Class",
           "flags": {},
           "children": [
             {
               "id": 9,
               "name": "constructor",
+              "variant": "declaration",
               "kind": 512,
-              "kindString": "Constructor",
               "flags": {},
               "signatures": [
                 {
                   "id": 10,
-                  "name": "new Exported",
+                  "name": "Exported",
+                  "variant": "signature",
                   "kind": 16384,
-                  "kindString": "Constructor signature",
                   "flags": {},
                   "type": {
                     "type": "reference",
-                    "id": 8,
-                    "name": "Exported"
+                    "target": 8,
+                    "name": "Exported",
+                    "package": "typedoc"
                   }
                 }
               ]
@@ -136,37 +169,45 @@
           "groups": [
             {
               "title": "Constructors",
-              "kind": 512,
               "children": [
                 9
               ]
+            }
+          ],
+          "sources": [
+            {
+              "fileName": "export-declaration.d.ts",
+              "line": 1,
+              "character": 21,
+              "url": "typedoc://export-declaration.d.ts#L1"
             }
           ]
         },
         {
           "id": 11,
           "name": "NotExported",
+          "variant": "declaration",
           "kind": 128,
-          "kindString": "Class",
           "flags": {},
           "children": [
             {
               "id": 12,
               "name": "constructor",
+              "variant": "declaration",
               "kind": 512,
-              "kindString": "Constructor",
               "flags": {},
               "signatures": [
                 {
                   "id": 13,
-                  "name": "new NotExported",
+                  "name": "NotExported",
+                  "variant": "signature",
                   "kind": 16384,
-                  "kindString": "Constructor signature",
                   "flags": {},
                   "type": {
                     "type": "reference",
-                    "id": 11,
-                    "name": "NotExported"
+                    "target": 11,
+                    "name": "NotExported",
+                    "package": "typedoc"
                   }
                 }
               ]
@@ -175,10 +216,17 @@
           "groups": [
             {
               "title": "Constructors",
-              "kind": 512,
               "children": [
                 12
               ]
+            }
+          ],
+          "sources": [
+            {
+              "fileName": "export-declaration.d.ts",
+              "line": 3,
+              "character": 14,
+              "url": "typedoc://export-declaration.d.ts#L3"
             }
           ]
         }
@@ -186,42 +234,69 @@
       "groups": [
         {
           "title": "Classes",
-          "kind": 128,
           "children": [
             8,
             11
           ]
+        }
+      ],
+      "sources": [
+        {
+          "fileName": "export-declaration.d.ts",
+          "line": 1,
+          "character": 0,
+          "url": "typedoc://export-declaration.d.ts#L1"
         }
       ]
     },
     {
       "id": 14,
       "name": "external",
+      "variant": "declaration",
       "kind": 2,
-      "kindString": "Module",
       "flags": {},
       "children": [
         {
           "id": 15,
           "name": "ActionSet",
+          "variant": "declaration",
           "kind": 32,
-          "kindString": "Variable",
-          "flags": {},
+          "flags": {
+            "isConst": true
+          },
+          "sources": [
+            {
+              "fileName": "external.d.ts",
+              "line": 3,
+              "character": 13,
+              "url": "typedoc://external.d.ts#L3"
+            }
+          ],
           "type": {
             "type": "reference",
-            "qualifiedName": "ts.server.ActionSet",
-            "package": "typescript",
-            "name": "ts.server.ActionSet"
+            "target": {
+              "sourceFileName": "node_modules/typescript/lib/typescript.d.ts",
+              "qualifiedName": "ts.server.ActionSet"
+            },
+            "name": "ts.server.ActionSet",
+            "package": "typescript"
           }
         }
       ],
       "groups": [
         {
           "title": "Variables",
-          "kind": 32,
           "children": [
             15
           ]
+        }
+      ],
+      "sources": [
+        {
+          "fileName": "external.d.ts",
+          "line": 1,
+          "character": 0,
+          "url": "typedoc://external.d.ts#L1"
         }
       ]
     }
@@ -229,12 +304,62 @@
   "groups": [
     {
       "title": "Modules",
-      "kind": 2,
       "children": [
         1,
         7,
         14
       ]
     }
-  ]
+  ],
+  "packageName": "typedoc",
+  "symbolIdMap": {
+    "1": {
+      "sourceFileName": "src/test/converter/declaration/declaration.d.ts",
+      "qualifiedName": ""
+    },
+    "2": {
+      "sourceFileName": "src/test/converter/declaration/declaration.d.ts",
+      "qualifiedName": "Decl"
+    },
+    "5": {
+      "sourceFileName": "src/test/converter/declaration/declaration.d.ts",
+      "qualifiedName": "Decl.prop"
+    },
+    "6": {
+      "sourceFileName": "src/test/converter/declaration/declaration.d.ts",
+      "qualifiedName": "x"
+    },
+    "7": {
+      "sourceFileName": "src/test/converter/declaration/export-declaration.d.ts",
+      "qualifiedName": ""
+    },
+    "8": {
+      "sourceFileName": "src/test/converter/declaration/export-declaration.d.ts",
+      "qualifiedName": "Exported"
+    },
+    "11": {
+      "sourceFileName": "src/test/converter/declaration/export-declaration.d.ts",
+      "qualifiedName": "NotExported"
+    },
+    "14": {
+      "sourceFileName": "src/test/converter/declaration/external.d.ts",
+      "qualifiedName": ""
+    },
+    "15": {
+      "sourceFileName": "src/test/converter/declaration/external.d.ts",
+      "qualifiedName": "ActionSet"
+    }
+  },
+  "files": {
+    "entries": {
+      "1": "src/test/converter/declaration/declaration.d.ts",
+      "2": "src/test/converter/declaration/export-declaration.d.ts",
+      "3": "src/test/converter/declaration/external.d.ts"
+    },
+    "reflections": {
+      "1": 1,
+      "2": 7,
+      "3": 14
+    }
+  }
 }

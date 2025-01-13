@@ -15,6 +15,16 @@ export class GetterSetter {
     set writeOnlyName(value: string) {
         this._name = value;
     }
+
+    /**
+     * Accessor comment
+     */
+    accessor autoAccessor: string;
+}
+
+export interface Ts51UnrelatedAccessorTypes {
+    get prop(): 1;
+    set prop(value: 2);
 }
 
 export {};

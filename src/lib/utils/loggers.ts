@@ -1,6 +1,13 @@
-import * as ts from "typescript";
+import ts from "typescript";
 import { url } from "inspector";
 import { resolve } from "path";
+import { nicePath } from "./paths.js";
+import type { MinimalSourceFile } from "./minimalSourceFile.js";
+import type {
+    TranslatedString,
+    TranslationProxy,
+} from "../internationalization/internationalization.js";
+import type { IfInternal } from "./index.js";
 
 const isDebugging = () => !!url();
 
@@ -12,6 +19,7 @@ export enum LogLevel {
     Info,
     Warn,
     Error,
+    None,
 }
 
 const Colors = {
@@ -19,30 +27,36 @@ const Colors = {
     yellow: "\u001b[93m",
     cyan: "\u001b[96m",
     gray: "\u001b[90m",
+    black: "\u001b[47m\u001b[30m",
     reset: "\u001b[0m",
 };
 
+function color(text: string, color: keyof typeof Colors) {
+    if ("NO_COLOR" in process.env) return text;
+
+    return `${Colors[color]}${text}${Colors.reset}`;
+}
+
 const messagePrefixes = {
-    [LogLevel.Error]: "Error: ",
-    [LogLevel.Warn]: "Warning: ",
-    [LogLevel.Info]: "Info: ",
-    [LogLevel.Verbose]: "Debug: ",
+    [LogLevel.Error]: color("[error]", "red"),
+    [LogLevel.Warn]: color("[warning]", "yellow"),
+    [LogLevel.Info]: color("[info]", "cyan"),
+    [LogLevel.Verbose]: color("[debug]", "gray"),
 };
 
-const coloredMessagePrefixes = {
-    [LogLevel.Error]: `${Colors.red}${messagePrefixes[LogLevel.Error]}${
-        Colors.reset
-    }`,
-    [LogLevel.Warn]: `${Colors.yellow}${messagePrefixes[LogLevel.Warn]}${
-        Colors.reset
-    }`,
-    [LogLevel.Info]: `${Colors.cyan}${messagePrefixes[LogLevel.Info]}${
-        Colors.reset
-    }`,
-    [LogLevel.Verbose]: `${Colors.gray}${messagePrefixes[LogLevel.Verbose]}${
-        Colors.reset
-    }`,
-};
+const dummyTranslationProxy: TranslationProxy = new Proxy(
+    {} as TranslationProxy,
+    {
+        get: (_target, key) => {
+            return (...args: string[]) =>
+                String(key).replace(/\{(\d+)\}/g, (_, index) => {
+                    return args[+index] ?? "(no placeholder)";
+                });
+        },
+    },
+);
+
+type FormatArgs = [ts.Node?] | [number, MinimalSourceFile];
 
 /**
  * A logger that will not produce any output.
@@ -51,6 +65,13 @@ const coloredMessagePrefixes = {
  * all the required utility functions.
  */
 export class Logger {
+    /**
+     * Translation utility for internationalization.
+     * @privateRemarks
+     * This is fully initialized by the application during bootstrapping.
+     */
+    i18n: TranslationProxy = dummyTranslationProxy;
+
     /**
      * How many error messages have been logged?
      */
@@ -103,57 +124,57 @@ export class Logger {
      * Log the given verbose message.
      *
      * @param text  The message that should be logged.
-     * @param args  The arguments that should be printed into the given message.
      */
     verbose(text: string) {
-        this.log(text, LogLevel.Verbose);
+        this.log(this.addContext(text, LogLevel.Verbose), LogLevel.Verbose);
     }
 
     /** Log the given info message. */
-    info(text: string) {
-        this.log(text, LogLevel.Info);
+    info(text: IfInternal<TranslatedString, string>) {
+        this.log(this.addContext(text, LogLevel.Info), LogLevel.Info);
     }
 
     /**
      * Log the given warning.
      *
      * @param text  The warning that should be logged.
-     * @param args  The arguments that should be printed into the given warning.
      */
-    warn(text: string) {
-        if (this.seenWarnings.has(text)) return;
-        this.seenWarnings.add(text);
-        this.log(text, LogLevel.Warn);
+    warn(text: IfInternal<TranslatedString, string>, node?: ts.Node): void;
+    warn(
+        text: IfInternal<TranslatedString, string>,
+        pos: number,
+        file: MinimalSourceFile,
+    ): void;
+    warn(text: string, ...args: FormatArgs): void {
+        const text2 = this.addContext(text, LogLevel.Warn, ...args);
+        if (this.seenWarnings.has(text2) && !isDebugging()) return;
+        this.seenWarnings.add(text2);
+        this.log(text2, LogLevel.Warn);
     }
 
     /**
      * Log the given error.
      *
      * @param text  The error that should be logged.
-     * @param args  The arguments that should be printed into the given error.
      */
-    error(text: string) {
-        if (this.seenErrors.has(text)) return;
-        this.seenErrors.add(text);
-        this.log(text, LogLevel.Error);
-    }
-
-    /** @internal */
-    deprecated(text: string, addStack = true) {
-        if (addStack) {
-            const stack = new Error().stack?.split("\n");
-            if (stack && stack.length >= 4) {
-                text = text + "\n" + stack[3];
-            }
-        }
-        this.warn(text);
+    error(text: IfInternal<TranslatedString, string>, node?: ts.Node): void;
+    error(
+        text: IfInternal<TranslatedString, string>,
+        pos: number,
+        file: MinimalSourceFile,
+    ): void;
+    error(text: string, ...args: FormatArgs) {
+        const text2 = this.addContext(text, LogLevel.Error, ...args);
+        if (this.seenErrors.has(text2) && !isDebugging()) return;
+        this.seenErrors.add(text2);
+        this.log(text2, LogLevel.Error);
     }
 
     /**
      * Print a log message.
      *
-     * @param _message  The message itself.
-     * @param level  The urgency of the log message.
+     * @param _message The message itself.
+     * @param level The urgency of the log message.
      */
     log(_message: string, level: LogLevel) {
         if (level === LogLevel.Error) {
@@ -198,6 +219,14 @@ export class Logger {
                 this.log(output, LogLevel.Info);
         }
     }
+
+    protected addContext(
+        message: string,
+        _level: LogLevel,
+        ..._args: [ts.Node?] | [number, MinimalSourceFile]
+    ): string {
+        return message;
+    }
 }
 
 /**
@@ -205,25 +234,12 @@ export class Logger {
  */
 export class ConsoleLogger extends Logger {
     /**
-     * Specifies if the logger is using color codes in its output.
-     */
-    private hasColoredOutput: boolean;
-
-    /**
-     * Create a new ConsoleLogger instance.
-     */
-    constructor() {
-        super();
-        this.hasColoredOutput = !("NO_COLOR" in process.env);
-    }
-
-    /**
      * Print a log message.
      *
      * @param message  The message itself.
      * @param level  The urgency of the log message.
      */
-    override log(message: string, level: LogLevel) {
+    override log(message: string, level: Exclude<LogLevel, LogLevel.None>) {
         super.log(message, level);
         if (level < this.level && !isDebugging()) {
             return;
@@ -238,41 +254,48 @@ export class ConsoleLogger extends Logger {
             } as const
         )[level];
 
-        const prefix = this.hasColoredOutput
-            ? coloredMessagePrefixes[level]
-            : messagePrefixes[level];
-
-        console[method](prefix + message);
-    }
-}
-
-/**
- * A logger that calls a callback function.
- */
-export class CallbackLogger extends Logger {
-    /**
-     * This loggers callback function
-     */
-    callback: Function;
-
-    /**
-     * Create a new CallbackLogger instance.
-     *
-     * @param callback  The callback that should be used to log messages.
-     */
-    constructor(callback: Function) {
-        super();
-        this.callback = callback;
+        // eslint-disable-next-line no-console
+        console[method](message);
     }
 
-    /**
-     * Print a log message.
-     *
-     * @param message  The message itself.
-     * @param level  The urgency of the log message.
-     */
-    override log(message: string, level: LogLevel) {
-        super.log(message, level);
-        this.callback(message, level);
+    protected override addContext(
+        message: string,
+        level: Exclude<LogLevel, LogLevel.None>,
+        ...args: [ts.Node?] | [number, MinimalSourceFile]
+    ): string {
+        if (typeof args[0] === "undefined") {
+            return `${messagePrefixes[level]} ${message}`;
+        }
+
+        if (typeof args[0] !== "number") {
+            return this.addContext(
+                message,
+                level,
+                args[0].getStart(args[0].getSourceFile(), false),
+                args[0].getSourceFile(),
+            );
+        }
+
+        const [pos, file] = args as [number, MinimalSourceFile];
+
+        const path = nicePath(file.fileName);
+        const { line, character } = file.getLineAndCharacterOfPosition(pos);
+
+        const location = `${color(path, "cyan")}:${color(
+            `${line + 1}`,
+            "yellow",
+        )}:${color(`${character}`, "yellow")}`;
+
+        const start = file.text.lastIndexOf("\n", pos) + 1;
+        let end = file.text.indexOf("\n", start);
+        if (end === -1) end = file.text.length;
+
+        const prefix = `${location} - ${messagePrefixes[level]}`;
+        const context = `${color(
+            `${line + 1}`,
+            "black",
+        )}    ${file.text.substring(start, end)}`;
+
+        return `${prefix} ${message}\n\n${context}\n`;
     }
 }

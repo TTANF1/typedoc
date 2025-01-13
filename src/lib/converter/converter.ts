@@ -1,54 +1,154 @@
-import * as ts from "typescript";
+import ts from "typescript";
 
-import type { Application } from "../application";
-import { ProjectReflection, ReflectionKind, SomeType } from "../models/index";
-import { Context } from "./context";
-import { ConverterComponent } from "./components";
-import { Component, ChildableComponent } from "../utils/component";
-import { BindOption } from "../utils";
-import { convertType } from "./types";
-import { ConverterEvents } from "./converter-events";
-import { convertSymbol } from "./symbols";
-import { createMinimatch, matchesAny } from "../utils/paths";
-import type { IMinimatch } from "minimatch";
-import { hasAllFlags, hasAnyFlag } from "../utils/enum";
-import { resolveAliasedSymbol } from "./utils/symbols";
-import type { DocumentationEntryPoint } from "../utils/entry-point";
+import type { Application } from "../application.js";
+import {
+    Comment,
+    type CommentDisplayPart,
+    type ContainerReflection,
+    type DeclarationReflection,
+    DocumentReflection,
+    type ParameterReflection,
+    ProjectReflection,
+    type Reflection,
+    ReflectionKind,
+    type ReflectionSymbolId,
+    type SignatureReflection,
+    type SomeType,
+    type TypeParameterReflection,
+} from "../models/index.js";
+import { Context } from "./context.js";
+import { AbstractComponent } from "../utils/component.js";
+import {
+    Option,
+    MinimalSourceFile,
+    readFile,
+    unique,
+    getDocumentEntryPoints,
+} from "../utils/index.js";
+import { convertType } from "./types.js";
+import { ConverterEvents } from "./converter-events.js";
+import { convertSymbol } from "./symbols.js";
+import { createMinimatch, matchesAny, nicePath } from "../utils/paths.js";
+import type { Minimatch } from "minimatch";
+import { hasAllFlags, hasAnyFlag } from "../utils/enum.js";
+import type { DocumentationEntryPoint } from "../utils/entry-point.js";
+import type { CommentParserConfig } from "./comments/index.js";
+import type {
+    CommentStyle,
+    ValidationOptions,
+} from "../utils/options/declaration.js";
+import { parseCommentString } from "./comments/parser.js";
+import { lexCommentString } from "./comments/rawLexer.js";
+import {
+    resolvePartLinks,
+    resolveLinks,
+    type ExternalSymbolResolver,
+    type ExternalResolveResult,
+} from "./comments/linkResolver.js";
+import {
+    meaningToString,
+    type DeclarationReference,
+} from "./comments/declarationReference.js";
+import { basename, dirname, resolve } from "path";
+import type { FileRegistry } from "../models/FileRegistry.js";
+
+import { GroupPlugin } from "./plugins/GroupPlugin.js";
+import { CategoryPlugin } from "./plugins/CategoryPlugin.js";
+import { CommentPlugin } from "./plugins/CommentPlugin.js";
+import { ImplementsPlugin } from "./plugins/ImplementsPlugin.js";
+import { InheritDocPlugin } from "./plugins/InheritDocPlugin.js";
+import { LinkResolverPlugin } from "./plugins/LinkResolverPlugin.js";
+import { PackagePlugin } from "./plugins/PackagePlugin.js";
+import { SourcePlugin } from "./plugins/SourcePlugin.js";
+import { TypePlugin } from "./plugins/TypePlugin.js";
+import { IncludePlugin } from "./plugins/IncludePlugin.js";
+import { MergeModuleWithPlugin } from "./plugins/MergeModuleWithPlugin.js";
+
+export interface ConverterEvents {
+    begin: [Context];
+    end: [Context];
+    createProject: [Context, ProjectReflection];
+    createDeclaration: [Context, DeclarationReflection];
+    createDocument: [undefined, DocumentReflection];
+    createSignature: [
+        Context,
+        SignatureReflection,
+        (
+            | ts.SignatureDeclaration
+            | ts.IndexSignatureDeclaration
+            | ts.JSDocSignature
+        )?,
+        ts.Signature?,
+    ];
+    createParameter: [Context, ParameterReflection, ts.Node?];
+    createTypeParameter: [
+        Context,
+        TypeParameterReflection,
+        ts.TypeParameterDeclaration?,
+    ];
+    resolveBegin: [Context];
+    resolveReflection: [Context, Reflection];
+    resolveEnd: [Context];
+}
 
 /**
  * Compiles source files using TypeScript and converts compiler symbols to reflections.
+ *
+ * @group Common
+ * @summary Responsible for converting TypeScript symbols into {@link Reflection}s and {@link Type}s.
  */
-@Component({
-    name: "converter",
-    internal: true,
-    childClass: ConverterComponent,
-})
-export class Converter extends ChildableComponent<
-    Application,
-    ConverterComponent
-> {
-    /**
-     * The human readable name of the project. Used within the templates to set the title of the document.
-     */
-    @BindOption("name")
-    name!: string;
+export class Converter extends AbstractComponent<Application, ConverterEvents> {
+    /** @internal */
+    @Option("externalPattern")
+    accessor externalPattern!: string[];
+    private externalPatternCache?: Minimatch[];
+    private excludeCache?: Minimatch[];
 
-    @BindOption("externalPattern")
-    externalPattern!: string[];
-    private externalPatternCache?: IMinimatch[];
-    private excludeCache?: IMinimatch[];
+    /** @internal */
+    @Option("excludeExternals")
+    accessor excludeExternals!: boolean;
 
-    @BindOption("excludeExternals")
-    excludeExternals!: boolean;
+    /** @internal */
+    @Option("excludePrivate")
+    accessor excludePrivate!: boolean;
 
-    @BindOption("excludeNotDocumented")
-    excludeNotDocumented!: boolean;
+    /** @internal */
+    @Option("excludeProtected")
+    accessor excludeProtected!: boolean;
 
-    @BindOption("excludePrivate")
-    excludePrivate!: boolean;
+    /** @internal */
+    @Option("excludeReferences")
+    accessor excludeReferences!: boolean;
 
-    @BindOption("excludeProtected")
-    excludeProtected!: boolean;
+    /** @internal */
+    @Option("commentStyle")
+    accessor commentStyle!: CommentStyle;
+
+    /** @internal */
+    @Option("validation")
+    accessor validation!: ValidationOptions;
+
+    /** @internal */
+    @Option("externalSymbolLinkMappings")
+    accessor externalSymbolLinkMappings!: Record<
+        string,
+        Record<string, string>
+    >;
+
+    /** @internal */
+    @Option("preserveLinkText")
+    accessor preserveLinkText!: boolean;
+
+    /** @internal */
+    @Option("maxTypeConversionDepth")
+    accessor maxTypeConversionDepth!: number;
+
+    private _config?: CommentParserConfig;
+    private _externalSymbolResolvers: Array<ExternalSymbolResolver> = [];
+
+    get config(): CommentParserConfig {
+        return this._config || this._buildCommentParserConfig();
+    }
 
     /**
      * General events
@@ -73,30 +173,47 @@ export class Converter extends ChildableComponent<
      */
 
     /**
+     * Triggered when the converter has created a project reflection.
+     * The listener will be given {@link Context} and a {@link Models.ProjectReflection}.
+     * @event
+     */
+    static readonly EVENT_CREATE_PROJECT = ConverterEvents.CREATE_PROJECT;
+
+    /**
      * Triggered when the converter has created a declaration reflection.
-     * The listener will be given {@link Context}, {@link Reflection} and a `ts.Node?`.
+     * The listener will be given {@link Context} and a {@link Models.DeclarationReflection}.
      * @event
      */
     static readonly EVENT_CREATE_DECLARATION =
         ConverterEvents.CREATE_DECLARATION;
 
     /**
+     * Triggered when the converter has created a document reflection.
+     * The listener will be given `undefined` (for consistency with the
+     * other create events) and a {@link Models.DocumentReflection}.
+     * @event
+     */
+    static readonly EVENT_CREATE_DOCUMENT = ConverterEvents.CREATE_DOCUMENT;
+
+    /**
      * Triggered when the converter has created a signature reflection.
-     * The listener will be given {@link Context}, {@link SignatureReflection} and a `ts.Node?`
+     * The listener will be given {@link Context}, {@link Models.SignatureReflection} | {@link Models.ProjectReflection} the declaration,
+     * `ts.SignatureDeclaration | ts.IndexSignatureDeclaration | ts.JSDocSignature | undefined`,
+     * and `ts.Signature | undefined`. The signature will be undefined if the created signature is an index signature.
      * @event
      */
     static readonly EVENT_CREATE_SIGNATURE = ConverterEvents.CREATE_SIGNATURE;
 
     /**
      * Triggered when the converter has created a parameter reflection.
-     * The listener will be given {@link Context}, {@link ParameterReflection} and a `ts.Node?`
+     * The listener will be given {@link Context}, {@link Models.ParameterReflection} and a `ts.Node?`
      * @event
      */
     static readonly EVENT_CREATE_PARAMETER = ConverterEvents.CREATE_PARAMETER;
 
     /**
      * Triggered when the converter has created a type parameter reflection.
-     * The listener will be given {@link Context}, {@link TypeParameterReflection} and a `ts.Node?`
+     * The listener will be given {@link Context} and a {@link Models.TypeParameterReflection}
      * @event
      */
     static readonly EVENT_CREATE_TYPE_PARAMETER =
@@ -127,127 +244,212 @@ export class Converter extends ChildableComponent<
      */
     static readonly EVENT_RESOLVE_END = ConverterEvents.RESOLVE_END;
 
+    /** @internal @hidden */
+    includePlugin: IncludePlugin;
+
+    constructor(owner: Application) {
+        super(owner);
+
+        const userConfiguredSymbolResolver: ExternalSymbolResolver = (
+            ref,
+            refl,
+            _part,
+            symbolId,
+        ) => {
+            if (symbolId) {
+                return userConfiguredSymbolResolver(
+                    symbolId.toDeclarationReference(),
+                    refl,
+                    undefined,
+                    undefined,
+                );
+            }
+
+            // Require global links, matching local ones will likely hide mistakes where the
+            // user meant to link to a local type.
+            if (ref.resolutionStart !== "global" || !ref.symbolReference) {
+                return;
+            }
+
+            const modLinks =
+                this.externalSymbolLinkMappings[ref.moduleSource ?? "global"];
+            if (typeof modLinks !== "object") {
+                return;
+            }
+
+            let name = "";
+            if (ref.symbolReference.path) {
+                name += ref.symbolReference.path.map((p) => p.path).join(".");
+            }
+            if (ref.symbolReference.meaning) {
+                name += meaningToString(ref.symbolReference.meaning);
+            }
+
+            if (typeof modLinks[name] === "string") {
+                return modLinks[name];
+            }
+            if (typeof modLinks["*"] === "string") {
+                return modLinks["*"];
+            }
+        };
+        this.addUnknownSymbolResolver(userConfiguredSymbolResolver);
+
+        new CategoryPlugin(this);
+        new CommentPlugin(this);
+        new GroupPlugin(this);
+        new ImplementsPlugin(this);
+        new InheritDocPlugin(this);
+        new LinkResolverPlugin(this);
+        new PackagePlugin(this);
+        new SourcePlugin(this);
+        new TypePlugin(this);
+        this.includePlugin = new IncludePlugin(this);
+        new MergeModuleWithPlugin(this);
+    }
+
     /**
      * Compile the given source files and create a project reflection for them.
      */
     convert(
-        entryPoints: readonly DocumentationEntryPoint[]
+        entryPoints: readonly DocumentationEntryPoint[],
     ): ProjectReflection {
-        const programs = entryPoints.map((e) => e.program);
+        const programs = unique(entryPoints.map((e) => e.program));
         this.externalPatternCache = void 0;
 
-        const project = new ProjectReflection(this.name);
+        const project = new ProjectReflection(
+            this.application.options.getValue("name"),
+            this.application.files,
+        );
         const context = new Context(this, programs, project);
 
         this.trigger(Converter.EVENT_BEGIN, context);
 
+        this.addProjectDocuments(project);
         this.compile(entryPoints, context);
         this.resolve(context);
-        // This should only do anything if a plugin does something bad.
-        project.removeDanglingReferences();
 
         this.trigger(Converter.EVENT_END, context);
+        this._config = undefined;
 
         return project;
     }
 
     /** @internal */
-    convertSymbol(context: Context, symbol: ts.Symbol) {
-        convertSymbol(context, symbol);
+    addProjectDocuments(project: ProjectReflection) {
+        const projectDocuments = getDocumentEntryPoints(
+            this.application.logger,
+            this.application.options,
+        );
+        for (const { displayName, path } of projectDocuments) {
+            let file: MinimalSourceFile;
+            try {
+                file = new MinimalSourceFile(readFile(path), path);
+            } catch (error: any) {
+                this.application.logger.error(
+                    this.application.logger.i18n.failed_to_read_0_when_processing_project_document(
+                        path,
+                    ),
+                );
+                continue;
+            }
+            this.addDocument(project, file, displayName);
+        }
+    }
+
+    /** @internal */
+    convertSymbol(
+        context: Context,
+        symbol: ts.Symbol,
+        exportSymbol?: ts.Symbol,
+    ) {
+        convertSymbol(context, symbol, exportSymbol);
     }
 
     /**
      * Convert the given TypeScript type into its TypeDoc type reflection.
      *
      * @param context  The context object describing the current state the converter is in.
-     * @param referenceTarget The target to be used to attempt to resolve reference types
      * @returns The TypeDoc type reflection representing the given node and type.
      * @internal
      */
+    convertType(context: Context, node: ts.TypeNode | undefined): SomeType;
+    convertType(context: Context, type: ts.Type, node?: ts.TypeNode): SomeType;
     convertType(
         context: Context,
-        node: ts.TypeNode | ts.Type | undefined
+        typeOrNode: ts.TypeNode | ts.Type | undefined,
+        maybeNode?: ts.TypeNode,
     ): SomeType {
-        return convertType(context, node);
+        return convertType(context, typeOrNode, maybeNode);
+    }
+
+    /**
+     * Parse the given file into a comment. Intended to be used with markdown files.
+     */
+    parseRawComment(file: MinimalSourceFile, files: FileRegistry) {
+        return parseCommentString(
+            lexCommentString(file.text),
+            this.config,
+            file,
+            this.application.logger,
+            files,
+        );
+    }
+
+    /**
+     * Adds a new resolver that the theme can use to try to figure out how to link to a symbol declared
+     * by a third-party library which is not included in the documentation.
+     *
+     * The resolver function will be passed a declaration reference which it can attempt to resolve. If
+     * resolution fails, the function should return undefined.
+     *
+     * Note: This will be used for both references to types declared in node_modules (in which case the
+     * reference passed will have the `moduleSource` set and the `symbolReference` will navigate via `.`)
+     * and user defined \{\@link\} tags which cannot be resolved. If the link being resolved is inferred
+     * from a type, then no `part` will be passed to the resolver function.
+     */
+    addUnknownSymbolResolver(resolver: ExternalSymbolResolver): void {
+        this._externalSymbolResolvers.push(resolver);
     }
 
     /** @internal */
-    getNodesForSymbol(symbol: ts.Symbol, kind: ReflectionKind) {
-        const wantedKinds: ts.SyntaxKind[] = {
-            [ReflectionKind.Project]: [ts.SyntaxKind.SourceFile],
-            [ReflectionKind.Module]: [ts.SyntaxKind.SourceFile],
-            [ReflectionKind.Namespace]: [
-                ts.SyntaxKind.ModuleDeclaration,
-                ts.SyntaxKind.SourceFile,
-            ],
-            [ReflectionKind.Enum]: [
-                ts.SyntaxKind.EnumDeclaration,
-                ts.SyntaxKind.VariableDeclaration,
-            ],
-            [ReflectionKind.EnumMember]: [
-                ts.SyntaxKind.EnumMember,
-                ts.SyntaxKind.PropertyAssignment,
-            ],
-            [ReflectionKind.Variable]: [ts.SyntaxKind.VariableDeclaration],
-            [ReflectionKind.Function]: [
-                ts.SyntaxKind.FunctionDeclaration,
-                ts.SyntaxKind.VariableDeclaration,
-            ],
-            [ReflectionKind.Class]: [ts.SyntaxKind.ClassDeclaration],
-            [ReflectionKind.Interface]: [
-                ts.SyntaxKind.InterfaceDeclaration,
-                ts.SyntaxKind.JSDocTypedefTag,
-            ],
-            [ReflectionKind.Constructor]: [ts.SyntaxKind.Constructor],
-            [ReflectionKind.Property]: [
-                ts.SyntaxKind.PropertyDeclaration,
-                ts.SyntaxKind.PropertySignature,
-                ts.SyntaxKind.JSDocPropertyTag,
-                ts.SyntaxKind.BinaryExpression,
-            ],
-            [ReflectionKind.Method]: [
-                ts.SyntaxKind.MethodDeclaration,
-                ts.SyntaxKind.PropertyDeclaration,
-                ts.SyntaxKind.PropertySignature,
-            ],
-            [ReflectionKind.CallSignature]: [
-                ts.SyntaxKind.FunctionDeclaration,
-                ts.SyntaxKind.VariableDeclaration,
-                ts.SyntaxKind.MethodDeclaration,
-                ts.SyntaxKind.MethodDeclaration,
-                ts.SyntaxKind.PropertyDeclaration,
-                ts.SyntaxKind.PropertySignature,
-                ts.SyntaxKind.CallSignature,
-            ],
-            [ReflectionKind.IndexSignature]: [ts.SyntaxKind.IndexSignature],
-            [ReflectionKind.ConstructorSignature]: [
-                ts.SyntaxKind.ConstructSignature,
-            ],
-            [ReflectionKind.Parameter]: [ts.SyntaxKind.Parameter],
-            [ReflectionKind.TypeLiteral]: [ts.SyntaxKind.TypeLiteral],
-            [ReflectionKind.TypeParameter]: [ts.SyntaxKind.TypeParameter],
-            [ReflectionKind.Accessor]: [
-                ts.SyntaxKind.GetAccessor,
-                ts.SyntaxKind.SetAccessor,
-            ],
-            [ReflectionKind.GetSignature]: [ts.SyntaxKind.GetAccessor],
-            [ReflectionKind.SetSignature]: [ts.SyntaxKind.SetAccessor],
-            [ReflectionKind.ObjectLiteral]: [
-                ts.SyntaxKind.ObjectLiteralExpression,
-            ],
-            [ReflectionKind.TypeAlias]: [
-                ts.SyntaxKind.TypeAliasDeclaration,
-                ts.SyntaxKind.JSDocTypedefTag,
-            ],
-            [ReflectionKind.Event]: [], /// this needs to go away
-            [ReflectionKind.Reference]: [
-                ts.SyntaxKind.NamespaceExport,
-                ts.SyntaxKind.ExportSpecifier,
-            ],
-        }[kind];
+    resolveExternalLink(
+        ref: DeclarationReference,
+        refl: Reflection,
+        part: CommentDisplayPart | undefined,
+        symbolId: ReflectionSymbolId | undefined,
+    ): ExternalResolveResult | string | undefined {
+        for (const resolver of this._externalSymbolResolvers) {
+            const resolved = resolver(ref, refl, part, symbolId);
+            if (resolved) return resolved;
+        }
+    }
 
-        const declarations = symbol.getDeclarations() ?? [];
-        return declarations.filter((d) => wantedKinds.includes(d.kind));
+    resolveLinks(comment: Comment, owner: Reflection): void;
+    resolveLinks(
+        parts: readonly CommentDisplayPart[],
+        owner: Reflection,
+    ): CommentDisplayPart[];
+    resolveLinks(
+        comment: Comment | readonly CommentDisplayPart[],
+        owner: Reflection,
+    ): CommentDisplayPart[] | undefined {
+        if (comment instanceof Comment) {
+            resolveLinks(
+                comment,
+                owner,
+                (ref, part, refl, id) =>
+                    this.resolveExternalLink(ref, part, refl, id),
+                { preserveLinkText: this.preserveLinkText },
+            );
+        } else {
+            return resolvePartLinks(
+                owner,
+                comment,
+                (ref, part, refl, id) =>
+                    this.resolveExternalLink(ref, part, refl, id),
+                { preserveLinkText: this.preserveLinkText },
+            );
+        }
     }
 
     /**
@@ -258,7 +460,7 @@ export class Converter extends ChildableComponent<
      */
     private compile(
         entryPoints: readonly DocumentationEntryPoint[],
-        context: Context
+        context: Context,
     ) {
         const entries = entryPoints.map((e) => {
             return {
@@ -266,13 +468,29 @@ export class Converter extends ChildableComponent<
                 context: undefined as Context | undefined,
             };
         });
+
+        let createModuleReflections = entries.length > 1;
+        if (!createModuleReflections) {
+            const opts = this.application.options;
+            createModuleReflections = opts.isSet("alwaysCreateEntryPointModule")
+                ? opts.getValue("alwaysCreateEntryPointModule")
+                : !!(context.scope as ProjectReflection).documents;
+        }
+
+        if (createModuleReflections) {
+            this.trigger(
+                ConverterEvents.CREATE_PROJECT,
+                context,
+                context.project,
+            );
+        }
+
         entries.forEach((e) => {
             context.setActiveProgram(e.entryPoint.program);
             e.context = this.convertExports(
                 context,
-                e.entryPoint.sourceFile,
-                entries.length === 1,
-                e.entryPoint.displayName
+                e.entryPoint,
+                createModuleReflections,
             );
         });
         for (const { entryPoint, context } of entries) {
@@ -287,32 +505,30 @@ export class Converter extends ChildableComponent<
 
     private convertExports(
         context: Context,
-        node: ts.SourceFile,
-        singleEntryPoint: boolean,
-        entryName: string
+        entryPoint: DocumentationEntryPoint,
+        createModuleReflections: boolean,
     ) {
+        const node = entryPoint.sourceFile;
+        const entryName = entryPoint.displayName;
         const symbol = getSymbolForModuleLike(context, node);
         let moduleContext: Context;
 
-        const allExports = getExports(context, node, symbol);
-
-        if (
-            allExports.every((exp) => this.shouldIgnore(exp, context.checker))
-        ) {
-            this.owner.logger.verbose(
-                `Ignoring entry point ${entryName} since all members will be ignored.`
-            );
-            return;
-        }
-
-        if (singleEntryPoint) {
+        if (createModuleReflections === false) {
             // Special case for when we're giving a single entry point, we don't need to
             // create modules for each entry. Register the project as this module.
-            context.project.registerReflection(context.project, symbol);
-            context.trigger(
-                Converter.EVENT_CREATE_DECLARATION,
+            context.project.registerReflection(
                 context.project,
-                node
+                symbol,
+                entryPoint.sourceFile.fileName,
+            );
+            context.project.comment = symbol
+                ? context.getComment(symbol, context.project.kind)
+                : context.getFileComment(node);
+            this.processDocumentTags(context.project, context.project);
+            this.trigger(
+                ConverterEvents.CREATE_PROJECT,
+                context,
+                context.project,
             );
             moduleContext = context;
         } else {
@@ -320,21 +536,22 @@ export class Converter extends ChildableComponent<
                 ReflectionKind.Module,
                 symbol,
                 void 0,
-                entryName
+                entryName,
             );
-            context.finalizeDeclarationReflection(
-                reflection,
-                symbol,
-                void 0,
-                node
-            );
+
+            if (!reflection.comment && !symbol) {
+                reflection.comment = context.getFileComment(node);
+            }
+
+            context.finalizeDeclarationReflection(reflection);
             moduleContext = context.withScope(reflection);
         }
 
+        const allExports = getExports(context, node, symbol);
         for (const exp of allExports.filter((exp) =>
-            isDirectExport(context.resolveAliasedSymbol(exp), node)
+            isDirectExport(context.resolveAliasedSymbol(exp), node),
         )) {
-            convertSymbol(moduleContext, exp);
+            this.convertSymbol(moduleContext, exp);
         }
 
         return moduleContext;
@@ -344,12 +561,12 @@ export class Converter extends ChildableComponent<
         for (const exp of getExports(
             moduleContext,
             node,
-            moduleContext.project.getSymbolFromReflection(moduleContext.scope)
+            moduleContext.project.getSymbolFromReflection(moduleContext.scope),
         ).filter(
             (exp) =>
-                !isDirectExport(moduleContext.resolveAliasedSymbol(exp), node)
+                !isDirectExport(moduleContext.resolveAliasedSymbol(exp), node),
         )) {
-            convertSymbol(moduleContext, exp);
+            this.convertSymbol(moduleContext, exp);
         }
     }
 
@@ -363,72 +580,190 @@ export class Converter extends ChildableComponent<
         this.trigger(Converter.EVENT_RESOLVE_BEGIN, context);
         const project = context.project;
 
-        for (const reflection of Object.values(project.reflections)) {
-            this.trigger(Converter.EVENT_RESOLVE, context, reflection);
+        for (const id in project.reflections) {
+            this.trigger(
+                Converter.EVENT_RESOLVE,
+                context,
+                project.reflections[id],
+            );
         }
 
         this.trigger(Converter.EVENT_RESOLVE_END, context);
     }
 
-    /** @internal */
-    shouldIgnore(symbol: ts.Symbol, checker: ts.TypeChecker) {
-        if (
-            this.excludeNotDocumented &&
-            // If the enum is included, we should include members even if not documented.
-            !hasAllFlags(symbol.flags, ts.SymbolFlags.EnumMember) &&
-            resolveAliasedSymbol(symbol, checker).getDocumentationComment(
-                checker
-            ).length === 0
-        ) {
-            return true;
-        }
-
+    /**
+     * Used to determine if we should immediately bail when creating a reflection.
+     * Note: This should not be used for excludeNotDocumented because we don't have enough
+     * information at this point since comment discovery hasn't happened.
+     * @internal
+     */
+    shouldIgnore(symbol: ts.Symbol) {
         if (this.isExcluded(symbol)) {
             return true;
         }
 
-        if (!this.excludeExternals) {
-            return false;
-        }
-
-        return this.isExternal(symbol);
+        return this.excludeExternals && this.isExternal(symbol);
     }
 
     private isExcluded(symbol: ts.Symbol) {
         this.excludeCache ??= createMinimatch(
-            this.application.options.getValue("exclude")
+            this.application.options.getValue("exclude"),
         );
+        const cache = this.excludeCache;
 
-        for (const node of symbol.getDeclarations() ?? []) {
-            if (matchesAny(this.excludeCache, node.getSourceFile().fileName)) {
-                return true;
-            }
-        }
-
-        return false;
+        return (symbol.getDeclarations() ?? []).some((node) =>
+            matchesAny(cache, node.getSourceFile().fileName),
+        );
     }
 
     /** @internal */
     isExternal(symbol: ts.Symbol) {
         this.externalPatternCache ??= createMinimatch(this.externalPattern);
-        for (const node of symbol.getDeclarations() ?? []) {
-            if (
-                matchesAny(
-                    this.externalPatternCache,
-                    node.getSourceFile().fileName
-                )
-            ) {
-                return true;
+        const cache = this.externalPatternCache;
+
+        return (symbol.getDeclarations() ?? []).some((node) =>
+            matchesAny(cache, node.getSourceFile().fileName),
+        );
+    }
+
+    processDocumentTags(reflection: Reflection, parent: ContainerReflection) {
+        let relativeTo = reflection.comment?.sourcePath;
+        if (relativeTo) {
+            relativeTo = dirname(relativeTo);
+            const tags = reflection.comment?.getTags("@document") || [];
+            reflection.comment?.removeTags("@document");
+            for (const tag of tags) {
+                const path = Comment.combineDisplayParts(tag.content);
+
+                let file: MinimalSourceFile;
+                try {
+                    const resolved = resolve(relativeTo, path);
+                    file = new MinimalSourceFile(readFile(resolved), resolved);
+                } catch {
+                    this.application.logger.warn(
+                        this.application.logger.i18n.failed_to_read_0_when_processing_document_tag_in_1(
+                            nicePath(path),
+                            nicePath(reflection.comment!.sourcePath!),
+                        ),
+                    );
+                    continue;
+                }
+
+                this.addDocument(
+                    parent,
+                    file,
+                    basename(file.fileName).replace(/\.[^.]+$/, ""),
+                );
+            }
+        }
+    }
+
+    private addDocument(
+        parent: ContainerReflection | DocumentReflection,
+        file: MinimalSourceFile,
+        displayName: string,
+    ) {
+        const { content, frontmatter } = this.parseRawComment(
+            file,
+            parent.project.files,
+        );
+        const children = frontmatter["children"];
+        delete frontmatter["children"];
+        const docRefl = new DocumentReflection(
+            displayName,
+            parent,
+            content,
+            frontmatter,
+        );
+
+        parent.addChild(docRefl);
+        parent.project.registerReflection(docRefl, undefined, file.fileName);
+        this.trigger(ConverterEvents.CREATE_DOCUMENT, undefined, docRefl);
+
+        const childrenToAdd: [string, string][] = [];
+        if (children && typeof children === "object") {
+            if (Array.isArray(children)) {
+                for (const child of children) {
+                    if (typeof child === "string") {
+                        childrenToAdd.push([
+                            basename(child).replace(/\.[^.]+$/, ""),
+                            child,
+                        ]);
+                    } else {
+                        this.application.logger.error(
+                            this.application.i18n.frontmatter_children_0_should_be_an_array_of_strings_or_object_with_string_values(
+                                nicePath(file.fileName),
+                            ),
+                        );
+                        return;
+                    }
+                }
+            } else {
+                for (const [name, path] of Object.entries(children)) {
+                    if (typeof path === "string") {
+                        childrenToAdd.push([name, path]);
+                    } else {
+                        this.application.logger.error(
+                            this.application.i18n.frontmatter_children_0_should_be_an_array_of_strings_or_object_with_string_values(
+                                nicePath(file.fileName),
+                            ),
+                        );
+                        return;
+                    }
+                }
             }
         }
 
-        return false;
+        for (const [displayName, path] of childrenToAdd) {
+            const absPath = resolve(dirname(file.fileName), path);
+            let childFile: MinimalSourceFile;
+            try {
+                childFile = new MinimalSourceFile(readFile(absPath), absPath);
+            } catch (error: any) {
+                this.application.logger.error(
+                    this.application.logger.i18n.failed_to_read_0_when_processing_document_child_in_1(
+                        path,
+                        nicePath(file.fileName),
+                    ),
+                );
+                continue;
+            }
+            this.addDocument(docRefl, childFile, displayName);
+        }
+    }
+
+    private _buildCommentParserConfig() {
+        this._config = {
+            blockTags: new Set(this.application.options.getValue("blockTags")),
+            inlineTags: new Set(
+                this.application.options.getValue("inlineTags"),
+            ),
+            modifierTags: new Set(
+                this.application.options.getValue("modifierTags"),
+            ),
+            jsDocCompatibility:
+                this.application.options.getValue("jsDocCompatibility"),
+            suppressCommentWarningsInDeclarationFiles:
+                this.application.options.getValue(
+                    "suppressCommentWarningsInDeclarationFiles",
+                ),
+            useTsLinkResolution: this.application.options.getValue(
+                "useTsLinkResolution",
+            ),
+            commentStyle: this.application.options.getValue("commentStyle"),
+        };
+
+        // Can't be included in options because the TSDoc parser blows up if we do.
+        // TypeDoc supports it as one, so it should always be included here.
+        this._config.blockTags.add("@inheritDoc");
+
+        return this._config;
     }
 }
 
 function getSymbolForModuleLike(
     context: Context,
-    node: ts.SourceFile | ts.ModuleBlock
+    node: ts.SourceFile | ts.ModuleBlock,
 ) {
     const symbol = context.checker.getSymbolAtLocation(node) ?? node.symbol;
 
@@ -443,7 +778,7 @@ function getSymbolForModuleLike(
     const globalSymbols = context.checker
         .getSymbolsInScope(node, ts.SymbolFlags.ModuleMember)
         .filter((s) =>
-            s.getDeclarations()?.some((d) => d.getSourceFile() === sourceFile)
+            s.getDeclarations()?.some((d) => d.getSourceFile() === sourceFile),
         );
 
     // Detect declaration files with declare module "foo" as their only export
@@ -455,7 +790,7 @@ function getSymbolForModuleLike(
             ?.every(
                 (declaration) =>
                     ts.isModuleDeclaration(declaration) &&
-                    ts.isStringLiteral(declaration.name)
+                    ts.isStringLiteral(declaration.name),
             )
     ) {
         return globalSymbols[0];
@@ -464,8 +799,8 @@ function getSymbolForModuleLike(
 
 function getExports(
     context: Context,
-    node: ts.SourceFile | ts.ModuleBlock,
-    symbol: ts.Symbol | undefined
+    node: ts.SourceFile,
+    symbol: ts.Symbol | undefined,
 ): ts.Symbol[] {
     let result: ts.Symbol[];
 
@@ -483,14 +818,36 @@ function getExports(
                     (s) =>
                         !hasAnyFlag(
                             s.flags,
-                            ts.SymbolFlags.Prototype | ts.SymbolFlags.Value
-                        )
-                )
+                            ts.SymbolFlags.Prototype | ts.SymbolFlags.Value,
+                        ),
+                ),
         );
     } else if (symbol) {
         result = context.checker
             .getExportsOfModule(symbol)
             .filter((s) => !hasAllFlags(s.flags, ts.SymbolFlags.Prototype));
+
+        if (result.length === 0) {
+            const globalDecl = node.statements.find(
+                (s) =>
+                    ts.isModuleDeclaration(s) &&
+                    s.flags & ts.NodeFlags.GlobalAugmentation,
+            );
+
+            if (globalDecl) {
+                const globalSymbol = context.getSymbolAtLocation(globalDecl);
+                if (globalSymbol) {
+                    result = context.checker
+                        .getExportsOfModule(globalSymbol)
+                        .filter((exp) =>
+                            exp.declarations?.some(
+                                (d) => d.getSourceFile() === node,
+                            ),
+                        )
+                        .map((s) => context.checker.getMergedSymbol(s));
+                }
+            }
+        }
     } else {
         // Global file with no inferred top level symbol, get all symbols declared in this file.
         const sourceFile = node.getSourceFile();
@@ -499,7 +856,7 @@ function getExports(
             .filter((s) =>
                 s
                     .getDeclarations()
-                    ?.some((d) => d.getSourceFile() === sourceFile)
+                    ?.some((d) => d.getSourceFile() === sourceFile),
             );
     }
 

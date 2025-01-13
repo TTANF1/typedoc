@@ -1,73 +1,96 @@
 import {
     ReflectionKind,
     DeclarationReflection,
-    DeclarationHierarchy,
-} from "../../models/reflections/index";
-import { Type, ReferenceType } from "../../models/types";
-import { Component, ConverterComponent } from "../components";
-import { Converter } from "../converter";
-import type { Context } from "../context";
+    type DeclarationHierarchy,
+    type ProjectReflection,
+    type Reflection,
+} from "../../models/reflections/index.js";
+import { type SomeType, type Type, ReferenceType } from "../../models/types.js";
+import { ConverterComponent } from "../components.js";
+import type { Context } from "../context.js";
+import { ApplicationEvents } from "../../application-events.js";
+import { ConverterEvents } from "../converter-events.js";
+import type { Converter } from "../converter.js";
 
 /**
- * A handler that converts all instances of {@link LateResolvingType} to their renderable equivalents.
+ * Responsible for adding `implementedBy` / `implementedFrom`
  */
-@Component({ name: "type" })
 export class TypePlugin extends ConverterComponent {
     reflections = new Set<DeclarationReflection>();
 
-    /**
-     * Create a new TypeHandler instance.
-     */
-    override initialize() {
-        this.listenTo(this.owner, {
-            [Converter.EVENT_RESOLVE]: this.onResolve,
-            [Converter.EVENT_RESOLVE_END]: this.onResolveEnd,
-            [Converter.EVENT_END]: () => this.reflections.clear(),
-        });
+    constructor(owner: Converter) {
+        super(owner);
+        this.owner.on(ConverterEvents.RESOLVE, this.onResolve.bind(this));
+        this.owner.on(
+            ConverterEvents.RESOLVE_END,
+            this.onResolveEnd.bind(this),
+        );
+        this.owner.on(ConverterEvents.END, () => this.reflections.clear());
+        this.application.on(
+            ApplicationEvents.REVIVE,
+            this.onRevive.bind(this),
+            100,
+        );
     }
 
-    /**
-     * Triggered when the converter resolves a reflection.
-     *
-     * @param context  The context object describing the current state the converter is in.
-     * @param reflection  The reflection that is currently resolved.
-     */
-    private onResolve(context: Context, reflection: DeclarationReflection) {
+    private onRevive(project: ProjectReflection) {
+        for (const id in project.reflections) {
+            this.resolve(project, project.reflections[id]);
+        }
+        this.finishResolve(project);
+        this.reflections.clear();
+    }
+
+    private onResolve(context: Context, reflection: Reflection) {
+        this.resolve(context.project, reflection);
+    }
+
+    private resolve(project: ProjectReflection, reflection: Reflection) {
+        if (!(reflection instanceof DeclarationReflection)) return;
+
         if (reflection.kindOf(ReflectionKind.ClassOrInterface)) {
             this.postpone(reflection);
 
             walk(reflection.implementedTypes, (target) => {
                 this.postpone(target);
-                if (!target.implementedBy) {
-                    target.implementedBy = [];
-                }
-                target.implementedBy.push(
-                    ReferenceType.createResolvedReference(
-                        reflection.name,
-                        reflection,
-                        context.project
+                target.implementedBy ||= [];
+
+                if (
+                    !target.implementedBy.some(
+                        (t) => t.reflection === reflection,
                     )
-                );
+                ) {
+                    target.implementedBy.push(
+                        ReferenceType.createResolvedReference(
+                            reflection.name,
+                            reflection,
+                            project,
+                        ),
+                    );
+                }
             });
 
             walk(reflection.extendedTypes, (target) => {
                 this.postpone(target);
-                if (!target.extendedBy) {
-                    target.extendedBy = [];
+                target.extendedBy ||= [];
+
+                if (
+                    !target.extendedBy.some((t) => t.reflection === reflection)
+                ) {
+                    target.extendedBy.push(
+                        ReferenceType.createResolvedReference(
+                            reflection.name,
+                            reflection,
+                            project,
+                        ),
+                    );
                 }
-                target.extendedBy.push(
-                    ReferenceType.createResolvedReference(
-                        reflection.name,
-                        reflection,
-                        context.project
-                    )
-                );
             });
         }
 
         function walk(
             types: Type[] | undefined,
-            callback: { (declaration: DeclarationReflection): void }
+            callback: { (declaration: DeclarationReflection): void },
         ) {
             if (!types) {
                 return;
@@ -91,10 +114,11 @@ export class TypePlugin extends ConverterComponent {
         this.reflections.add(reflection);
     }
 
-    /**
-     * Triggered when the converter has finished resolving a project.
-     */
     private onResolveEnd(context: Context) {
+        this.finishResolve(context.project);
+    }
+
+    private finishResolve(project: ProjectReflection) {
         this.reflections.forEach((reflection) => {
             if (reflection.implementedBy) {
                 reflection.implementedBy.sort((a, b) => {
@@ -105,9 +129,9 @@ export class TypePlugin extends ConverterComponent {
                 });
             }
 
-            let root!: DeclarationHierarchy;
-            let hierarchy!: DeclarationHierarchy;
-            function push(types: Type[]) {
+            let root: DeclarationHierarchy | undefined;
+            let hierarchy: DeclarationHierarchy | undefined;
+            function push(types: SomeType[]) {
                 const level: DeclarationHierarchy = { types: types };
                 if (hierarchy) {
                     hierarchy.next = level;
@@ -125,16 +149,19 @@ export class TypePlugin extends ConverterComponent {
                 ReferenceType.createResolvedReference(
                     reflection.name,
                     reflection,
-                    context.project
+                    project,
                 ),
             ]);
-            hierarchy.isTarget = true;
+            hierarchy!.isTarget = true;
 
             if (reflection.extendedBy) {
                 push(reflection.extendedBy);
             }
 
-            reflection.typeHierarchy = root;
+            // No point setting up a hierarchy if there is no hierarchy to display
+            if (root!.next) {
+                reflection.typeHierarchy = root;
+            }
         });
     }
 }

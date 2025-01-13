@@ -1,169 +1,108 @@
-import { EventDispatcher } from "../utils";
-import type { ProjectReflection } from "../models";
+import { EventDispatcher } from "../utils/index.js";
+import type { ProjectReflection } from "../models/index.js";
 
-import type { SerializerComponent } from "./components";
-import { SerializeEvent, SerializeEventData } from "./events";
-import type { ModelToObject } from "./schema";
-import * as S from "./serializers";
+import { SerializeEvent } from "./events.js";
+import type { ModelToObject } from "./schema.js";
+import type { SerializerComponent } from "./components.js";
+import { insertPrioritySorted, removeIfPresent } from "../utils/array.js";
 
-export class Serializer extends EventDispatcher {
+export interface SerializerEvents {
+    begin: [SerializeEvent];
+    end: [SerializeEvent];
+}
+
+/**
+ * Serializes TypeDoc's models to JSON
+ *
+ * @group Common
+ * @summary Serializes TypeDoc's models to JSON
+ */
+export class Serializer extends EventDispatcher<SerializerEvents> {
     /**
      * Triggered when the {@link Serializer} begins transforming a project.
-     * @event EVENT_BEGIN
+     * @event
      */
-    static EVENT_BEGIN = "begin";
+    static readonly EVENT_BEGIN = "begin";
 
     /**
      * Triggered when the {@link Serializer} has finished transforming a project.
-     * @event EVENT_END
+     * @event
      */
-    static EVENT_END = "end";
+    static readonly EVENT_END = "end";
+
+    private serializers: SerializerComponent<any>[] = [];
 
     /**
-     * Serializers, sorted by their `serializeGroup` function to enable higher performance.
+     * Only set when serializing.
      */
-    private serializers = new Map<
-        (instance: unknown) => boolean,
-        SerializerComponent<any>[]
-    >();
+    projectRoot!: string;
 
-    constructor() {
-        super();
-        addSerializers(this);
+    /**
+     * Only set when serializing
+     */
+    project!: ProjectReflection;
+
+    addSerializer<T extends object>(serializer: SerializerComponent<T>): void {
+        insertPrioritySorted(this.serializers, serializer);
     }
 
-    addSerializer(serializer: SerializerComponent<any>): void {
-        let group = this.serializers.get(serializer.serializeGroup);
-
-        if (!group) {
-            this.serializers.set(serializer.serializeGroup, (group = []));
-        }
-
-        group.push(serializer);
-        group.sort((a, b) => b.priority - a.priority);
+    removeSerializer(serializer: SerializerComponent<any>): void {
+        removeIfPresent(this.serializers, serializer);
     }
 
-    toObject<T>(value: T, init?: object): ModelToObject<T>;
-    toObject(value: unknown, init: object = {}): unknown {
-        if (value == null || typeof value !== "object") {
-            return value; // Serializing some primitive
+    toObject<T extends { toObject(serializer: Serializer): ModelToObject<T> }>(
+        value: T,
+    ): ModelToObject<T>;
+    toObject<T extends { toObject(serializer: Serializer): ModelToObject<T> }>(
+        value: T | undefined,
+    ): ModelToObject<T> | undefined;
+    toObject(
+        value: { toObject(serializer: Serializer): any } | undefined,
+    ): unknown {
+        if (value === undefined) {
+            return undefined;
         }
 
-        if (Array.isArray(value)) {
-            if (value.length === 0) {
-                return undefined;
-            }
-            return value.map((val) => this.toObject(val));
+        return this.serializers
+            .filter((s) => s.supports(value))
+            .reduce(
+                (val, s) => s.toObject(value, val, this),
+                value.toObject(this),
+            );
+    }
+
+    toObjectsOptional<
+        T extends { toObject(serializer: Serializer): ModelToObject<T> },
+    >(value: T[] | undefined): ModelToObject<T>[] | undefined {
+        if (!value || value.length === 0) {
+            return undefined;
         }
 
-        // Note: This type *could* potentially lie, if a serializer declares a partial type but fails to provide
-        // the defined property, but the benefit of being mostly typed is probably worth it.
-        // TypeScript errors out if init is correctly typed as `Partial<ModelToObject<T>>`
-        return this.findSerializers(value).reduce<any>(
-            (result, curr) => curr.toObject(value, result),
-            init
-        );
+        return value.map((val) => this.toObject(val));
     }
 
     /**
      * Same as toObject but emits {@link Serializer.EVENT_BEGIN} and {@link Serializer.EVENT_END} events.
      * @param value
-     * @param eventData Partial information to set in the event
      */
     projectToObject(
         value: ProjectReflection,
-        eventData: { begin?: SerializeEventData; end?: SerializeEventData } = {}
+        projectRoot: string,
     ): ModelToObject<ProjectReflection> {
-        const eventBegin = new SerializeEvent(
-            Serializer.EVENT_BEGIN,
-            value,
-            {}
-        );
-        if (eventData.begin) {
-            eventBegin.outputDirectory = eventData.begin.outputDirectory;
-            eventBegin.outputFile = eventData.begin.outputFile;
-        }
-        this.trigger(eventBegin);
+        this.projectRoot = projectRoot;
+        this.project = value;
 
-        const project = this.toObject(value, eventBegin.output);
+        const eventBegin = new SerializeEvent(value);
+        this.trigger(Serializer.EVENT_BEGIN, eventBegin);
 
-        const eventEnd = new SerializeEvent(
-            Serializer.EVENT_END,
-            value,
-            project
-        );
-        if (eventData.end) {
-            eventBegin.outputDirectory = eventData.end.outputDirectory;
-            eventBegin.outputFile = eventData.end.outputFile;
-        }
-        this.trigger(eventEnd);
+        const project = this.toObject(value);
+
+        const eventEnd = new SerializeEvent(value, project);
+        this.trigger(Serializer.EVENT_END, eventEnd);
+
+        this.project = undefined!;
+        this.projectRoot = undefined!;
 
         return project;
-    }
-
-    private findSerializers<T>(value: T): SerializerComponent<T>[] {
-        const routes: SerializerComponent<any>[] = [];
-
-        for (const [groupSupports, components] of this.serializers.entries()) {
-            if (groupSupports(value)) {
-                for (const component of components) {
-                    if (component.supports(value)) {
-                        routes.push(component);
-                    }
-                }
-            }
-        }
-
-        return routes as any;
-    }
-}
-
-const serializerComponents: (new (
-    owner: Serializer
-) => SerializerComponent<any>)[] = [
-    S.CommentTagSerializer,
-    S.CommentSerializer,
-
-    S.ReflectionSerializer,
-    S.ReferenceReflectionSerializer,
-    S.ContainerReflectionSerializer,
-    S.DeclarationReflectionSerializer,
-    S.ParameterReflectionSerializer,
-    S.SignatureReflectionSerializer,
-    S.TypeParameterReflectionSerializer,
-
-    S.SourceReferenceContainerSerializer,
-
-    S.TypeSerializer,
-    S.ArrayTypeSerializer,
-    S.ConditionalTypeSerializer,
-    S.IndexedAccessTypeSerializer,
-    S.InferredTypeSerializer,
-    S.IntersectionTypeSerializer,
-    S.IntrinsicTypeSerializer,
-    S.OptionalTypeSerializer,
-    S.PredicateTypeSerializer,
-    S.QueryTypeSerializer,
-    S.ReferenceTypeSerializer,
-    S.ReferenceTypeSerializer,
-    S.ReflectionTypeSerializer,
-    S.RestTypeSerializer,
-    S.LiteralTypeSerializer,
-    S.TupleTypeSerializer,
-    S.TemplateLiteralTypeSerializer,
-    S.NamedTupleMemberTypeSerializer,
-    S.MappedTypeSerializer,
-    S.TypeOperatorTypeSerializer,
-    S.UnionTypeSerializer,
-    S.UnknownTypeSerializer,
-
-    S.DecoratorContainerSerializer,
-    S.ReflectionCategorySerializer,
-    S.ReflectionGroupSerializer,
-];
-
-function addSerializers(owner: Serializer) {
-    for (const component of serializerComponents) {
-        owner.addSerializer(new component(owner));
     }
 }

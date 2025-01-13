@@ -1,13 +1,22 @@
 // @ts-check
 
-const cp = require("child_process");
-const { join } = require("path");
-const https = require("https");
-const { readFile, writeFile } = require("fs/promises");
+import cp from "child_process";
+import { join } from "path";
+import https from "https";
+import { readFile, writeFile } from "fs/promises";
+import { fileURLToPath } from "url";
+import { readFileSync } from "fs";
 
 const REMOTE = "origin";
 const REPO = "TypeStrong/typedoc";
-const CHANGELOG_MD = join(__dirname, "../CHANGELOG.md");
+const CHANGELOG_MD = join(fileURLToPath(import.meta.url), "../../CHANGELOG.md");
+
+const packageInfo = JSON.parse(
+    readFileSync(
+        join(fileURLToPath(import.meta.url), "../../package.json"),
+        "utf-8",
+    ),
+);
 
 /**
  * @param {string} cmd
@@ -62,10 +71,8 @@ async function createGitHubRelease(args) {
 
 async function main() {
     const lastTag = await exec("git describe --tags --abbrev=0");
-    const currentVersion = `v${
-        require(join(__dirname, "..", "package.json")).version
-    }`;
-    const [_major, _minor, patch] = currentVersion.substr(1).split(".");
+    const currentVersion = `v${packageInfo.version}`;
+    const [_major, _minor, patch] = currentVersion.substring(1).split(".");
 
     if (lastTag == currentVersion) {
         console.log("No version change, not publishing.");
@@ -76,17 +83,16 @@ async function main() {
 
     console.log("Updating changelog...");
     let fullChangelog = await readFile(CHANGELOG_MD, "utf-8");
-    const heading = patch === "0" ? "#" : "##";
-    let start = fullChangelog.indexOf(`${heading} ${currentVersion}`);
+    let start = fullChangelog.indexOf(`## ${currentVersion}`);
 
-    // If this version isn't in the changelog yet, take everything under # Unreleased and include that
+    // If this version isn't in the changelog yet, take everything under ## Unreleased and include that
     // as this version.
     if (start === -1) {
-        start = fullChangelog.indexOf("# Unreleased");
+        start = fullChangelog.indexOf("## Unreleased");
         if (start === -1) {
             start = 0;
         } else {
-            start += "# Unreleased".length;
+            start += "## Unreleased".length;
         }
 
         const date = new Date();
@@ -96,10 +102,13 @@ async function main() {
             date.getUTCDate().toString().padStart(2, "0"),
         ].join("-");
         fullChangelog =
-            "# Unreleased\n\n" +
-            `${heading} ${currentVersion} (${dateStr})` +
-            fullChangelog.substr(start);
-        start = fullChangelog.indexOf(`${heading} ${currentVersion}`);
+            "---\n" +
+            "title: Changelog\n" +
+            "---\n\n" +
+            "## Unreleased\n\n" +
+            `## ${currentVersion} (${dateStr})` +
+            fullChangelog.substring(start);
+        start = fullChangelog.indexOf(`## ${currentVersion}`);
 
         await writeFile(CHANGELOG_MD, fullChangelog);
         await exec(`git add "${CHANGELOG_MD}"`);
@@ -117,7 +126,7 @@ async function main() {
     await exec(`git tag -d ${currentVersion}`).catch(() => void 0);
     await exec(`git tag ${currentVersion}`);
     await exec(
-        `git push ${REMOTE} refs/tags/${currentVersion} --quiet --force`
+        `git push ${REMOTE} refs/tags/${currentVersion} --quiet --force`,
     );
 
     await createGitHubRelease({

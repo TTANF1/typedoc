@@ -1,7 +1,9 @@
 // Tests the `toString` functionality of the type models
 
-import * as T from "../../lib/models/types";
+import * as T from "../../lib/models/types.js";
 import { strictEqual as equal } from "assert";
+import { ProjectReflection } from "../../lib/models/index.js";
+import { FileRegistry } from "../../lib/models/FileRegistry.js";
 
 describe("Type.toString", () => {
     describe("Union types", () => {
@@ -32,7 +34,7 @@ describe("Type.toString", () => {
                     new T.LiteralType(1),
                     new T.LiteralType(2),
                     new T.LiteralType(3),
-                    new T.LiteralType(4)
+                    new T.LiteralType(4),
                 ),
                 new T.LiteralType(5),
             ]);
@@ -65,7 +67,7 @@ describe("Type.toString", () => {
                     new T.LiteralType(1),
                     new T.LiteralType(2),
                     new T.LiteralType(3),
-                    new T.LiteralType(4)
+                    new T.LiteralType(4),
                 ),
                 new T.LiteralType(5),
             ]);
@@ -80,7 +82,7 @@ describe("Type.toString", () => {
                 new T.UnionType([new T.LiteralType(1), new T.LiteralType(2)]),
                 new T.LiteralType("ext"),
                 new T.LiteralType("true"),
-                new T.LiteralType("false")
+                new T.LiteralType("false"),
             );
             equal(type.toString(), '(1 | 2) extends "ext" ? "true" : "false"');
         });
@@ -93,7 +95,7 @@ describe("Type.toString", () => {
                 ]),
                 new T.LiteralType("ext"),
                 new T.LiteralType("true"),
-                new T.LiteralType("false")
+                new T.LiteralType("false"),
             );
             equal(type.toString(), '(1 & 2) extends "ext" ? "true" : "false"');
         });
@@ -102,14 +104,14 @@ describe("Type.toString", () => {
     describe("Array types", () => {
         it("Does not wrap other array types", () => {
             const type = new T.ArrayType(
-                new T.ArrayType(new T.IntrinsicType("string"))
+                new T.ArrayType(new T.IntrinsicType("string")),
             );
             equal(type.toString(), "string[][]");
         });
 
         it("Wraps union types", () => {
             const type = new T.ArrayType(
-                new T.UnionType([new T.LiteralType(1), new T.LiteralType(2)])
+                new T.UnionType([new T.LiteralType(1), new T.LiteralType(2)]),
             );
             equal(type.toString(), "(1 | 2)[]");
         });
@@ -119,7 +121,7 @@ describe("Type.toString", () => {
                 new T.IntersectionType([
                     new T.LiteralType(1),
                     new T.LiteralType(2),
-                ])
+                ]),
             );
             equal(type.toString(), "(1 & 2)[]");
         });
@@ -148,7 +150,7 @@ describe("Type.toString", () => {
         it("Renders", () => {
             const type = new T.IndexedAccessType(
                 new T.IntrinsicType("string"),
-                new T.LiteralType("length")
+                new T.LiteralType("length"),
             );
 
             equal(type.toString(), 'string["length"]');
@@ -160,6 +162,11 @@ describe("Type.toString", () => {
             const type = new T.InferredType("TFoo");
             equal(type.toString(), "infer TFoo");
         });
+
+        it("Renders with a constraint", () => {
+            const type = new T.InferredType("TFoo", new T.LiteralType(123));
+            equal(type.toString(), "infer TFoo extends 123");
+        });
     });
 
     describe("Mapped types", () => {
@@ -170,7 +177,7 @@ describe("Type.toString", () => {
                 new T.LiteralType(2),
                 undefined,
                 undefined,
-                undefined
+                undefined,
             );
             equal(type.toString(), "{ [K in 1]: 2 }");
         });
@@ -182,7 +189,7 @@ describe("Type.toString", () => {
                 new T.LiteralType(2),
                 "+",
                 undefined,
-                undefined
+                undefined,
             );
             equal(type.toString(), "{ readonly [K in 1]: 2 }");
 
@@ -192,7 +199,7 @@ describe("Type.toString", () => {
                 new T.LiteralType(2),
                 "-",
                 undefined,
-                undefined
+                undefined,
             );
             equal(type2.toString(), "{ -readonly [K in 1]: 2 }");
         });
@@ -204,7 +211,7 @@ describe("Type.toString", () => {
                 new T.LiteralType(2),
                 undefined,
                 "+",
-                undefined
+                undefined,
             );
             equal(type.toString(), "{ [K in 1]?: 2 }");
 
@@ -214,7 +221,7 @@ describe("Type.toString", () => {
                 new T.LiteralType(2),
                 undefined,
                 "-",
-                undefined
+                undefined,
             );
             equal(type2.toString(), "{ [K in 1]-?: 2 }");
         });
@@ -226,7 +233,7 @@ describe("Type.toString", () => {
                 new T.LiteralType(2),
                 undefined,
                 undefined,
-                new T.LiteralType(3)
+                new T.LiteralType(3),
             );
             equal(type.toString(), "{ [K in 1 as 3]: 2 }");
         });
@@ -243,35 +250,46 @@ describe("Type.toString", () => {
                 new T.IntersectionType([
                     new T.LiteralType(1),
                     new T.LiteralType(2),
-                ])
+                ]),
             );
             equal(type.toString(), "(1 & 2)?");
         });
 
         it("Wraps type operators", () => {
             const type = new T.OptionalType(
-                new T.TypeOperatorType(new T.LiteralType(1), "keyof")
+                new T.TypeOperatorType(new T.LiteralType(1), "keyof"),
             );
             equal(type.toString(), "(keyof 1)?");
         });
 
-        it("Wraps type queries", () => {
+        it("Does not wrap type query", () => {
+            const project = new ProjectReflection("test", new FileRegistry());
             const type = new T.OptionalType(
                 new T.QueryType(
-                    T.ReferenceType.createResolvedReference("X", -1, null)
-                )
+                    T.ReferenceType.createResolvedReference("X", -1, project),
+                ),
             );
-            equal(type.toString(), "(typeof X)?");
+            equal(type.toString(), "typeof X?");
+        });
+    });
+
+    describe("Tuple", () => {
+        it("Works with members", () => {
+            const type = new T.TupleType([
+                new T.OptionalType(new T.LiteralType(123)),
+            ]);
+            equal(type.toString(), "[123?]");
         });
     });
 
     describe("Type operator", () => {
         it("Does not wrap type query", () => {
+            const project = new ProjectReflection("test", new FileRegistry());
             const type = new T.TypeOperatorType(
                 new T.QueryType(
-                    T.ReferenceType.createResolvedReference("X", -1, null)
+                    T.ReferenceType.createResolvedReference("X", -1, project),
                 ),
-                "keyof"
+                "keyof",
             );
             equal(type.toString(), "keyof typeof X");
         });
@@ -298,12 +316,6 @@ describe("Type.toString", () => {
         it("Does not wrap simple types", () => {
             const type = new T.RestType(new T.ArrayType(new T.LiteralType(1)));
             equal(type.toString(), "...1[]");
-        });
-        it("Wraps complex types", () => {
-            const type = new T.RestType(
-                new T.UnionType([new T.LiteralType(1), new T.LiteralType(2)])
-            );
-            equal(type.toString(), "...(1 | 2)");
         });
     });
 

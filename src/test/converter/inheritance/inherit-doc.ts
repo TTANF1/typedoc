@@ -46,9 +46,9 @@ export interface InterfaceTarget<T> {
  *
  * Remarks will be inherited
  *
- * @example
+ * @default
  *
- * This part of the commentary will not be inherited
+ * This part of the commentary will not be inherited (this is an abuse of this tag)
  *
  * @typeParam T - Type of arguments
  * @param arg1 - First argument
@@ -60,13 +60,6 @@ export function functionSource<T>(arg1: T, arg2: T): string {
         return `${arg1 + arg2}`;
     }
     return `${arg1}${arg2}`;
-}
-
-/**
- * @inheritDoc SubClassA.printName
- */
-export function functionTargetGlobal() {
-    return "";
 }
 
 /**

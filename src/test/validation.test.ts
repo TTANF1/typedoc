@@ -1,67 +1,55 @@
-import { equal, fail, ok } from "assert";
+import { ok } from "assert";
 import { join } from "path";
-import { Logger, LogLevel } from "..";
-import { validateExports } from "../lib/validation/exports";
-import { getConverter2App, getConverter2Program } from "./programs";
+import { validateDocumentation } from "../lib/validation/documentation.js";
+import { validateExports } from "../lib/validation/exports.js";
+import { getConverter2App, getConverter2Program } from "./programs.js";
+import { TestLogger } from "./TestLogger.js";
+import { fileURLToPath } from "url";
+
+function convertValidationFile(file: string) {
+    const app = getConverter2App();
+    const program = getConverter2Program();
+    const sourceFile = program.getSourceFile(
+        join(fileURLToPath(import.meta.url), "../converter2/validation", file),
+    );
+
+    ok(sourceFile, "Specified source file does not exist.");
+
+    const project = app.converter.convert([
+        {
+            displayName: "validation",
+            program,
+            sourceFile,
+        },
+    ]);
+
+    return project;
+}
 
 function expectWarning(
     typeName: string,
     file: string,
     referencingName: string,
-    intentionallyNotExported: readonly string[] = []
+    intentionallyNotExported: readonly string[] = [],
 ) {
-    const app = getConverter2App();
-    const program = getConverter2Program();
-    const sourceFile = program.getSourceFile(
-        join(__dirname, "converter2/validation", file)
+    const project = convertValidationFile(file);
+
+    const logger = new TestLogger();
+    validateExports(project, logger, intentionallyNotExported);
+
+    logger.expectMessage(
+        `warn: ${typeName}, defined in */${file}, is referenced by ${referencingName} but not included in the documentation`,
     );
-
-    ok(sourceFile, "Specified source file does not exist.");
-
-    const project = app.converter.convert([
-        {
-            displayName: "validation",
-            program,
-            sourceFile,
-        },
-    ]);
-
-    let sawWarning = false;
-    const regex =
-        /(.*?), defined at (.*?):\d+, is referenced by (.*?) but not included in the documentation\./;
-
-    class LoggerCheck extends Logger {
-        override log(message: string, level: LogLevel) {
-            const match = message.match(regex);
-            if (level === LogLevel.Warn && match) {
-                sawWarning = true;
-                equal(match[1], typeName, "Missing type name is different.");
-                equal(
-                    match[2],
-                    `dist/test/converter2/validation/${file}`,
-                    "Referencing file is different."
-                );
-                equal(
-                    match[3],
-                    referencingName,
-                    "Referencing name is different"
-                );
-            }
-        }
-    }
-
-    validateExports(project, new LoggerCheck(), intentionallyNotExported);
-    ok(sawWarning, `Expected warning message for ${typeName} to be reported.`);
 }
 
 function expectNoWarning(
     file: string,
-    intentionallyNotExported: readonly string[] = []
+    intentionallyNotExported: readonly string[] = [],
 ) {
     const app = getConverter2App();
     const program = getConverter2Program();
     const sourceFile = program.getSourceFile(
-        join(__dirname, "converter2/validation", file)
+        join(fileURLToPath(import.meta.url), "../converter2/validation", file),
     );
 
     ok(sourceFile, "Specified source file does not exist.");
@@ -74,19 +62,10 @@ function expectNoWarning(
         },
     ]);
 
-    const regex =
-        /(.*?), defined at (.*?):\d+, is referenced by (.*?) but not included in the documentation\./;
+    const logger = new TestLogger();
 
-    class LoggerCheck extends Logger {
-        override log(message: string, level: LogLevel) {
-            const match = message.match(regex);
-            if (level === LogLevel.Warn && match) {
-                fail("Expected no warnings about missing exports");
-            }
-        }
-    }
-
-    validateExports(project, new LoggerCheck(), intentionallyNotExported);
+    validateExports(project, logger, intentionallyNotExported);
+    logger.expectNoOtherMessages();
 }
 
 describe("validateExports", () => {
@@ -107,11 +86,11 @@ describe("validateExports", () => {
     });
 
     it("Should warn if a get signature type is missing", () => {
-        expectWarning("Bar", "getSignature.ts", "Foo.foo.foo");
+        expectWarning("Bar", "getSignature.ts", "Foo.foo");
     });
 
     it("Should warn if a set signature type is missing", () => {
-        expectWarning("Bar", "setSignature.ts", "Foo.foo.foo._value");
+        expectWarning("Bar", "setSignature.ts", "Foo.foo._value");
     });
 
     it("Should warn if an implemented type is missing", () => {
@@ -119,11 +98,11 @@ describe("validateExports", () => {
     });
 
     it("Should warn if a parameter type is missing", () => {
-        expectWarning("Bar", "parameter.ts", "Foo.Foo.x");
+        expectWarning("Bar", "parameter.ts", "Foo.x");
     });
 
     it("Should warn if a return type is missing", () => {
-        expectWarning("Bar", "return.ts", "foo.foo");
+        expectWarning("Bar", "return.ts", "foo");
     });
 
     it("Should allow filtering warnings by file name", () => {
@@ -140,11 +119,18 @@ describe("validateExports", () => {
         expectNoWarning("externalType.ts");
     });
 
+    it("Should not warn if namespaced name is given to intentionallyNotExported", () => {
+        expectNoWarning("namespace.ts", ["Bar.Baz"]);
+    });
+
     it("Should warn if intentionallyNotExported contains unused values", () => {
         const app = getConverter2App();
         const program = getConverter2Program();
         const sourceFile = program.getSourceFile(
-            join(__dirname, "converter2/validation/variable.ts")
+            join(
+                fileURLToPath(import.meta.url),
+                "../converter2/validation/variable.ts",
+            ),
         );
 
         ok(sourceFile, "Specified source file does not exist.");
@@ -157,27 +143,65 @@ describe("validateExports", () => {
             },
         ]);
 
-        let sawWarning = false;
-        class LoggerCheck extends Logger {
-            override log(message: string, level: LogLevel) {
-                if (
-                    level == LogLevel.Warn &&
-                    message.includes("intentionally not exported")
-                ) {
-                    sawWarning = true;
-                    ok(
-                        message.includes("notDefined"),
-                        "Should have included a warning about notDefined"
-                    );
-                    ok(
-                        !message.includes("Foo"),
-                        "Should not include a warn about Foo"
-                    );
-                }
-            }
-        }
+        const logger = new TestLogger();
+        validateExports(project, logger, ["notDefined", "Foo"]);
+        logger.expectMessage(
+            "warn: The following symbols were marked as intentionally not exported, but were either not referenced in the documentation, or were exported:\n\tnotDefined",
+        );
+        logger.expectNoOtherMessages();
+    });
+});
 
-        validateExports(project, new LoggerCheck(), ["notDefined", "Foo"]);
-        ok(sawWarning, "Never saw warning.");
+describe("validateDocumentation", () => {
+    it("Should correctly handle functions", () => {
+        const project = convertValidationFile("function.ts");
+        const logger = new TestLogger();
+        validateDocumentation(project, logger, ["Function"]);
+
+        logger.expectMessage(
+            "warn: bar (CallSignature), defined in */function.ts, does not have any documentation",
+        );
+        logger.expectNoOtherMessages();
+    });
+
+    it("Should correctly handle accessors", () => {
+        const project = convertValidationFile("getSignature.ts");
+        const logger = new TestLogger();
+        validateDocumentation(project, logger, ["Accessor"]);
+
+        logger.expectMessage(
+            "warn: Foo.foo (GetSignature), defined in */getSignature.ts, does not have any documentation",
+        );
+        logger.expectNoOtherMessages();
+    });
+
+    it("Should correctly handle constructors", () => {
+        const project = convertValidationFile("class.ts");
+        const logger = new TestLogger();
+        validateDocumentation(project, logger, ["Constructor"]);
+
+        logger.expectMessage(
+            "warn: Foo.constructor (ConstructorSignature), defined in */class.ts, does not have any documentation",
+        );
+        logger.expectNoOtherMessages();
+    });
+
+    it("Should correctly handle interfaces", () => {
+        const project = convertValidationFile("interface.ts");
+        const logger = new TestLogger();
+        validateDocumentation(project, logger, ["Method"]);
+
+        logger.expectMessage(
+            "warn: Foo.method (CallSignature), defined in */interface.ts, does not have any documentation",
+        );
+        logger.expectNoOtherMessages();
+    });
+
+    it("Should correctly handle callback parameters", () => {
+        const project = convertValidationFile("callbackParameters.ts");
+        const logger = new TestLogger();
+        validateDocumentation(project, logger, ["Parameter", "Property"]);
+
+        logger.expectNoOtherMessages();
     });
 });

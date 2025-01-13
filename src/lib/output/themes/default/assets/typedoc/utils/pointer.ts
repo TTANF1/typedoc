@@ -27,7 +27,7 @@ export let pointerUp: string = "mouseup";
 export const pointerDownPosition: Point = { x: 0, y: 0 };
 
 /**
- * Should the next click on the document be supressed?
+ * Should the next click on the document be suppressed?
  */
 export let preventNextClick: boolean = false;
 
@@ -51,7 +51,7 @@ export let hasPointerMoved: boolean = false;
  */
 export const isMobile: boolean =
     /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
-        navigator.userAgent
+        navigator.userAgent,
     );
 document.documentElement.classList.add(isMobile ? "is-mobile" : "not-mobile");
 

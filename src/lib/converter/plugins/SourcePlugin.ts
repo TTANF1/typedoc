@@ -1,71 +1,72 @@
-import * as Path from "path";
-import * as ts from "typescript";
+import ts from "typescript";
 
 import {
-    Reflection,
-    ProjectReflection,
     DeclarationReflection,
-} from "../../models/reflections/index";
-import { SourceDirectory, SourceFile } from "../../models/sources/index";
-import { Component, ConverterComponent } from "../components";
-import { Converter } from "../converter";
-import type { Context } from "../context";
-import { BindOption } from "../../utils";
-import { isNamedNode } from "../utils/nodes";
-import { getCommonDirectory, normalizePath } from "../../utils/fs";
+    SignatureReflection,
+} from "../../models/reflections/index.js";
+import { ConverterComponent } from "../components.js";
+import type { Context } from "../context.js";
+import {
+    Option,
+    normalizePath,
+    getCommonDirectory,
+} from "../../utils/index.js";
+import { isNamedNode } from "../utils/nodes.js";
 import { relative } from "path";
-import * as assert from "assert";
+import { SourceReference } from "../../models/index.js";
+import { gitIsInstalled, RepositoryManager } from "../utils/repository.js";
+import { ConverterEvents } from "../converter-events.js";
+import type { Converter } from "../converter.js";
 
 /**
  * A handler that attaches source file information to reflections.
  */
-@Component({ name: "source" })
 export class SourcePlugin extends ConverterComponent {
-    @BindOption("disableSources")
-    readonly disableSources!: boolean;
+    @Option("disableSources")
+    accessor disableSources!: boolean;
 
-    /**
-     * A map of all generated {@link SourceFile} instances.
-     */
-    private fileMappings: { [name: string]: SourceFile } = {};
+    @Option("gitRevision")
+    accessor gitRevision!: string;
+
+    @Option("gitRemote")
+    accessor gitRemote!: string;
+
+    @Option("disableGit")
+    accessor disableGit!: boolean;
+
+    @Option("sourceLinkTemplate")
+    accessor sourceLinkTemplate!: string;
+
+    @Option("basePath")
+    accessor basePath!: string;
 
     /**
      * All file names to find the base path from.
      */
     private fileNames = new Set<string>();
-    private basePath?: string;
 
-    /**
-     * Create a new SourceHandler instance.
-     */
-    override initialize() {
-        this.listenTo(this.owner, {
-            [Converter.EVENT_END]: this.onEnd,
-            [Converter.EVENT_CREATE_DECLARATION]: this.onDeclaration,
-            [Converter.EVENT_CREATE_SIGNATURE]: this.onDeclaration,
-            [Converter.EVENT_RESOLVE_BEGIN]: this.onBeginResolve,
-            [Converter.EVENT_RESOLVE]: this.onResolve,
-            [Converter.EVENT_RESOLVE_END]: this.onEndResolve,
-        });
-    }
+    private repositories?: RepositoryManager;
 
-    private getSourceFile(
-        fileName: string,
-        project: ProjectReflection
-    ): SourceFile {
-        if (!this.fileMappings[fileName]) {
-            const file = new SourceFile(fileName);
-            this.fileMappings[fileName] = file;
-            project.files.push(file);
-        }
-
-        return this.fileMappings[fileName];
+    constructor(owner: Converter) {
+        super(owner);
+        this.owner.on(ConverterEvents.END, this.onEnd.bind(this));
+        this.owner.on(
+            ConverterEvents.CREATE_DECLARATION,
+            this.onDeclaration.bind(this),
+        );
+        this.owner.on(
+            ConverterEvents.CREATE_SIGNATURE,
+            this.onSignature.bind(this),
+        );
+        this.owner.on(
+            ConverterEvents.RESOLVE_BEGIN,
+            this.onBeginResolve.bind(this),
+        );
     }
 
     private onEnd() {
-        this.fileMappings = {};
+        // Should probably clear repositories/ignoredPaths here, but these aren't likely to change between runs...
         this.fileNames.clear();
-        this.basePath = void 0;
     }
 
     /**
@@ -73,50 +74,69 @@ export class SourcePlugin extends ConverterComponent {
      *
      * Attach the current source file to the {@link DeclarationReflection.sources} array.
      *
-     * @param context  The context object describing the current state the converter is in.
+     * @param _context  The context object describing the current state the converter is in.
      * @param reflection  The reflection that is currently processed.
-     * @param node  The node that is currently processed if available.
      */
     private onDeclaration(
-        context: Context,
-        reflection: Reflection,
-        node?: ts.Node
+        _context: Context,
+        reflection: DeclarationReflection,
     ) {
-        if (!node || this.disableSources) {
-            return;
+        if (this.disableSources) return;
+
+        const symbol = reflection.project.getSymbolFromReflection(reflection);
+        for (const node of symbol?.declarations || []) {
+            const sourceFile = node.getSourceFile();
+            const fileName = normalizePath(sourceFile.fileName);
+            this.fileNames.add(fileName);
+
+            let position: ts.LineAndCharacter;
+            if (ts.isSourceFile(node)) {
+                position = { character: 0, line: 0 };
+            } else {
+                position = ts.getLineAndCharacterOfPosition(
+                    sourceFile,
+                    getLocationNode(node).getStart(),
+                );
+            }
+
+            reflection.sources ||= [];
+            reflection.sources.push(
+                new SourceReference(
+                    fileName,
+                    position.line + 1,
+                    position.character,
+                ),
+            );
         }
-        const sourceFile = node.getSourceFile();
-        const fileName = sourceFile.fileName;
+    }
+
+    private onSignature(
+        _context: Context,
+        reflection: SignatureReflection,
+        sig?:
+            | ts.SignatureDeclaration
+            | ts.IndexSignatureDeclaration
+            | ts.JSDocSignature,
+    ) {
+        if (this.disableSources || !sig) return;
+
+        const sourceFile = sig.getSourceFile();
+        const fileName = normalizePath(sourceFile.fileName);
         this.fileNames.add(fileName);
-        const file: SourceFile = this.getSourceFile(fileName, context.project);
 
-        let position: ts.LineAndCharacter;
-        if (isNamedNode(node)) {
-            position = ts.getLineAndCharacterOfPosition(
-                sourceFile,
-                node.name.getStart()
-            );
-        } else {
-            position = ts.getLineAndCharacterOfPosition(
-                sourceFile,
-                node.getStart()
-            );
-        }
+        const position = ts.getLineAndCharacterOfPosition(
+            sourceFile,
+            getLocationNode(sig).getStart(),
+        );
 
-        if (reflection instanceof DeclarationReflection) {
-            file.reflections.push(reflection);
-        }
-
-        if (!reflection.sources) {
-            reflection.sources = [];
-        }
-
-        reflection.sources.push({
-            file: file,
-            fileName: fileName,
-            line: position.line + 1,
-            character: position.character,
-        });
+        reflection.sources ||= [];
+        reflection.sources.push(
+            new SourceReference(
+                fileName,
+                position.line + 1,
+                position.character,
+            ),
+        );
     }
 
     /**
@@ -125,66 +145,100 @@ export class SourcePlugin extends ConverterComponent {
      * @param context  The context object describing the current state the converter is in.
      */
     private onBeginResolve(context: Context) {
-        this.basePath = getCommonDirectory([...this.fileNames]);
-        for (const file of context.project.files) {
-            const fileName = (file.fileName = normalizePath(
-                relative(this.basePath, file.fileName)
-            ));
-            this.fileMappings[fileName] = file;
-        }
-    }
+        if (this.disableSources) return;
 
-    /**
-     * Triggered when the converter resolves a reflection.
-     *
-     * @param context  The context object describing the current state the converter is in.
-     * @param reflection  The reflection that is currently resolved.
-     */
-    private onResolve(_context: Context, reflection: Reflection) {
-        assert(this.basePath != null);
-        for (const source of reflection.sources ?? []) {
-            source.fileName = normalizePath(
-                relative(this.basePath, source.fileName)
+        if (this.disableGit && !this.sourceLinkTemplate) {
+            this.application.logger.error(
+                context.i18n.disable_git_set_but_not_source_link_template(),
+            );
+            return;
+        }
+        if (
+            this.disableGit &&
+            this.sourceLinkTemplate.includes("{gitRevision}") &&
+            !this.gitRevision
+        ) {
+            this.application.logger.warn(
+                context.i18n.disable_git_set_and_git_revision_used(),
             );
         }
-    }
 
-    /**
-     * Triggered when the converter has finished resolving a project.
-     *
-     * @param context  The context object describing the current state the converter is in.
-     */
-    private onEndResolve(context: Context) {
-        const project = context.project;
-        const home = project.directory;
-        project.files.forEach((file) => {
-            const reflections: DeclarationReflection[] = [];
-            file.reflections.forEach((reflection) => {
-                reflections.push(reflection);
-            });
+        const basePath =
+            this.basePath || getCommonDirectory([...this.fileNames]);
+        this.repositories ||= new RepositoryManager(
+            basePath,
+            this.gitRevision,
+            this.gitRemote,
+            this.sourceLinkTemplate,
+            this.disableGit,
+            this.application.logger,
+        );
 
-            let directory = home;
-            const path = Path.dirname(file.fileName);
-            if (path !== ".") {
-                path.split("/").forEach((pathPiece) => {
-                    if (
-                        !Object.prototype.hasOwnProperty.call(
-                            directory.directories,
-                            pathPiece
-                        )
-                    ) {
-                        directory.directories[pathPiece] = new SourceDirectory(
-                            pathPiece,
-                            directory
-                        );
-                    }
-                    directory = directory.directories[pathPiece];
-                });
+        for (const id in context.project.reflections) {
+            const refl = context.project.reflections[id];
+
+            if (
+                !(
+                    refl instanceof DeclarationReflection ||
+                    refl instanceof SignatureReflection
+                )
+            ) {
+                continue;
             }
 
-            directory.files.push(file);
-            file.parent = directory;
-            file.reflections = reflections;
-        });
+            if (replaceSourcesWithParentSources(refl)) {
+                refl.sources = (refl.parent as DeclarationReflection).sources;
+            }
+
+            for (const source of refl.sources || []) {
+                if (this.disableGit || gitIsInstalled()) {
+                    const repo = this.repositories.getRepository(
+                        source.fullFileName,
+                    );
+                    source.url = repo?.getURL(source.fullFileName, source.line);
+                }
+
+                source.fileName = normalizePath(
+                    relative(basePath, source.fullFileName),
+                );
+            }
+        }
     }
+}
+
+function getLocationNode(node: ts.Node) {
+    if (isNamedNode(node)) return node.name;
+    return node;
+}
+
+function replaceSourcesWithParentSources(
+    refl: SignatureReflection | DeclarationReflection,
+) {
+    if (refl instanceof DeclarationReflection || !refl.sources) {
+        return false;
+    }
+
+    const symbol = refl.project.getSymbolFromReflection(refl.parent);
+    if (!symbol?.declarations) {
+        return false;
+    }
+
+    for (const decl of symbol.declarations) {
+        const file = decl.getSourceFile();
+        const pos = file.getLineAndCharacterOfPosition(decl.pos);
+        const end = file.getLineAndCharacterOfPosition(decl.end);
+
+        if (
+            refl.sources.some(
+                (src) =>
+                    src.fullFileName === file.fileName &&
+                    pos.line <= src.line - 1 &&
+                    src.line - 1 <= end.line,
+            )
+        ) {
+            return false;
+        }
+    }
+
+    return true;
 }

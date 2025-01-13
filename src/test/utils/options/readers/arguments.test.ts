@@ -1,57 +1,62 @@
-import { deepStrictEqual as equal, ok } from "assert";
+import { deepStrictEqual as equal } from "assert";
 
-import { Options, Logger } from "../../../../lib/utils";
-import { ArgumentsReader } from "../../../../lib/utils/options/readers";
+import { Options } from "../../../../lib/utils/index.js";
+import { ArgumentsReader } from "../../../../lib/utils/options/readers/index.js";
 import {
     ParameterType,
-    NumberDeclarationOption,
-    MapDeclarationOption,
-} from "../../../../lib/utils/options";
+    type NumberDeclarationOption,
+    type MapDeclarationOption,
+} from "../../../../lib/utils/options/index.js";
 import { join, resolve } from "path";
+import { TestLogger } from "../../../TestLogger.js";
+import { Internationalization } from "../../../../lib/internationalization/internationalization.js";
+
+const emptyHelp = () => "";
 
 describe("Options - ArgumentsReader", () => {
-    const logger = new Logger();
+    const logger = new TestLogger();
+    afterEach(() => logger.reset());
     // Note: We lie about the type of Options here since we want the less strict
     // behavior for tests. If TypeDoc ever gets a numeric option, then we can
     // exclusively use the builtin options for tests and this cast can go away.
-    const options = new Options(logger) as Options & {
+    let options: Options & {
         addDeclaration(
             declaration: Readonly<NumberDeclarationOption> & {
                 name: "numOption";
-            }
+            },
         ): void;
         addDeclaration(
             declaration: Readonly<MapDeclarationOption<number>> & {
                 name: "mapped";
-            }
+            },
         ): void;
         getValue(name: "numOption"): number;
         getValue(name: "mapped"): number;
     };
-    options.addDefaultDeclarations();
-    options.addDeclaration({
-        name: "numOption",
-        help: "",
-        type: ParameterType.Number,
-    });
-    options.addDeclaration({
-        name: "mapped",
-        type: ParameterType.Map,
-        help: "",
-        map: { a: 1, b: 2 },
-        defaultValue: 3,
+
+    beforeEach(() => {
+        options = new Options(new Internationalization(null).proxy);
+        options.addDeclaration({
+            name: "numOption",
+            help: emptyHelp,
+            type: ParameterType.Number,
+        });
+        options.addDeclaration({
+            name: "mapped",
+            type: ParameterType.Map,
+            help: emptyHelp,
+            map: { a: 1, b: 2 },
+            defaultValue: 3,
+        });
     });
 
     function test(name: string, args: string[], cb: () => void) {
-        it(name, () => {
+        it(name, async () => {
             const reader = new ArgumentsReader(1, args);
-            logger.resetErrors();
-            logger.resetWarnings();
             options.reset();
             options.addReader(reader);
-            options.read(logger);
+            await options.read(logger);
             cb();
-            options.removeReaderByName(reader.name);
         });
     }
 
@@ -80,7 +85,7 @@ describe("Options - ArgumentsReader", () => {
         () => {
             equal(options.getValue("includeVersion"), true);
             equal(options.getValue("entryPoints"), []);
-        }
+        },
     );
 
     test(
@@ -89,7 +94,7 @@ describe("Options - ArgumentsReader", () => {
         () => {
             equal(options.getValue("includeVersion"), false);
             equal(options.getValue("entryPoints"), []);
-        }
+        },
     );
 
     test(
@@ -100,15 +105,11 @@ describe("Options - ArgumentsReader", () => {
             equal(options.getValue("entryPoints"), [
                 join(process.cwd(), "foo"),
             ]);
-        }
+        },
     );
 
     test("Works with map options", ["--mapped", "b"], () => {
         equal(options.getValue("mapped"), 2);
-    });
-
-    test("Works with mixed options", ["--logger", "word"], () => {
-        equal(options.getValue("logger"), "word");
     });
 
     test("Works with array options", ["--exclude", "a"], () => {
@@ -120,40 +121,32 @@ describe("Options - ArgumentsReader", () => {
         ["--exclude", "a", "--exclude", "b"],
         () => {
             equal(options.getValue("exclude"), [resolve("a"), resolve("b")]);
-        }
+        },
     );
 
-    it("Errors if given an unknown option", () => {
-        let check = false;
-        class TestLogger extends Logger {
-            override error(msg: string) {
-                equal(msg, "Unknown option: --badOption");
-                check = true;
-            }
-        }
+    it("Errors if given an unknown option", async () => {
+        const similarOptions = options.getSimilarOptions("badOption");
         const reader = new ArgumentsReader(1, ["--badOption"]);
         options.reset();
         options.addReader(reader);
-        options.read(new TestLogger());
-        options.removeReaderByName(reader.name);
-        equal(check, true, "Reader did not report an error.");
+        await options.read(logger);
+        logger.expectMessage(
+            `error: Unknown option: --badOption, you may have meant:\n\t${similarOptions.join(
+                "\n\t",
+            )}`,
+        );
     });
 
-    it("Warns if option is expecting a value but no value is provided", () => {
-        let check = false;
-        class TestLogger extends Logger {
-            override warn(msg: string) {
-                ok(msg.includes("--out"));
-                check = true;
-            }
-        }
-
+    it("Warns if option is expecting a value but no value is provided", async () => {
         const reader = new ArgumentsReader(1, ["--out"]);
         options.reset();
         options.addReader(reader);
-        options.read(new TestLogger());
-        options.removeReaderByName(reader.name);
-        equal(check, true, "Reader did not report an error.");
+        const logger = new TestLogger();
+        await options.read(logger);
+        logger.expectMessage(
+            "warn: --out expected a value, but none was given as an argument",
+        );
+        logger.expectNoOtherMessages();
     });
 
     test(
@@ -166,8 +159,10 @@ describe("Options - ArgumentsReader", () => {
                 notExported: true,
                 notDocumented: false,
                 invalidLink: true,
+                rewrittenLink: true,
+                unusedMergeModuleWith: true,
             });
-        }
+        },
     );
 
     test(
@@ -185,8 +180,10 @@ describe("Options - ArgumentsReader", () => {
                 notExported: false,
                 notDocumented: false,
                 invalidLink: true,
+                rewrittenLink: true,
+                unusedMergeModuleWith: true,
             });
-        }
+        },
     );
 
     test(
@@ -199,8 +196,10 @@ describe("Options - ArgumentsReader", () => {
                 notExported: true,
                 notDocumented: true,
                 invalidLink: true,
+                rewrittenLink: true,
+                unusedMergeModuleWith: true,
             });
-        }
+        },
     );
 
     test(
@@ -213,8 +212,10 @@ describe("Options - ArgumentsReader", () => {
                 notExported: true,
                 notDocumented: true,
                 invalidLink: true,
+                rewrittenLink: true,
+                unusedMergeModuleWith: true,
             });
-        }
+        },
     );
 
     test(
@@ -227,7 +228,9 @@ describe("Options - ArgumentsReader", () => {
                 notExported: false,
                 notDocumented: false,
                 invalidLink: false,
+                rewrittenLink: false,
+                unusedMergeModuleWith: false,
             });
-        }
+        },
     );
 });

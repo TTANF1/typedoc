@@ -1,25 +1,38 @@
 {
   "id": 0,
-  "name": "typedoc",
+  "name": "alias",
+  "variant": "project",
   "kind": 1,
-  "kindString": "Project",
   "flags": {},
   "children": [
     {
       "id": 8,
       "name": "IsString",
-      "kind": 4194304,
-      "kindString": "Type alias",
+      "variant": "declaration",
+      "kind": 2097152,
       "flags": {},
       "comment": {
-        "shortText": "Conditional types from TS2.8"
+        "summary": [
+          {
+            "kind": "text",
+            "text": "Conditional types from TS2.8"
+          }
+        ]
       },
-      "typeParameter": [
+      "sources": [
+        {
+          "fileName": "alias.ts",
+          "line": 16,
+          "character": 12,
+          "url": "typedoc://alias.ts#L16"
+        }
+      ],
+      "typeParameters": [
         {
           "id": 9,
           "name": "T",
+          "variant": "typeParam",
           "kind": 131072,
-          "kindString": "Type parameter",
           "flags": {}
         }
       ],
@@ -27,8 +40,10 @@
         "type": "conditional",
         "checkType": {
           "type": "reference",
-          "id": 9,
-          "name": "T"
+          "target": 9,
+          "name": "T",
+          "package": "typedoc",
+          "refersToTypeParameter": true
         },
         "extendsType": {
           "type": "intrinsic",
@@ -45,20 +60,66 @@
       }
     },
     {
-      "id": 10,
-      "name": "PromiseType",
-      "kind": 4194304,
-      "kindString": "Type alias",
+      "id": 12,
+      "name": "MergedCrossReference",
+      "variant": "declaration",
+      "kind": 2097152,
       "flags": {},
       "comment": {
-        "shortText": "Extracts the type of a promise."
+        "summary": [
+          {
+            "kind": "inline-tag",
+            "tag": "@link",
+            "text": "class!class.TestClass"
+          }
+        ]
       },
-      "typeParameter": [
+      "sources": [
+        {
+          "fileName": "alias.ts",
+          "line": 26,
+          "character": 12,
+          "url": "typedoc://alias.ts#L26"
+        }
+      ],
+      "type": {
+        "type": "reference",
+        "target": {
+          "sourceFileName": "src/test/converter/class/class.ts",
+          "qualifiedName": "TestClass"
+        },
+        "name": "TestClass",
+        "package": "typedoc"
+      }
+    },
+    {
+      "id": 10,
+      "name": "PromiseType",
+      "variant": "declaration",
+      "kind": 2097152,
+      "flags": {},
+      "comment": {
+        "summary": [
+          {
+            "kind": "text",
+            "text": "Extracts the type of a promise."
+          }
+        ]
+      },
+      "sources": [
+        {
+          "fileName": "alias.ts",
+          "line": 21,
+          "character": 12,
+          "url": "typedoc://alias.ts#L21"
+        }
+      ],
+      "typeParameters": [
         {
           "id": 11,
           "name": "T",
+          "variant": "typeParam",
           "kind": 131072,
-          "kindString": "Type parameter",
           "flags": {}
         }
       ],
@@ -66,44 +127,73 @@
         "type": "conditional",
         "checkType": {
           "type": "reference",
-          "id": 11,
-          "name": "T"
+          "target": 11,
+          "name": "T",
+          "package": "typedoc",
+          "refersToTypeParameter": true
         },
         "extendsType": {
           "type": "reference",
+          "target": {
+            "sourceFileName": "node_modules/typescript/lib/lib.es5.d.ts",
+            "qualifiedName": "PromiseLike"
+          },
           "typeArguments": [
             {
               "type": "inferred",
               "name": "U"
             }
           ],
-          "qualifiedName": "PromiseLike",
-          "package": "typescript",
-          "name": "PromiseLike"
+          "name": "PromiseLike",
+          "package": "typescript"
         },
         "trueType": {
           "type": "reference",
-          "name": "U"
+          "target": {
+            "sourceFileName": "src/test/converter/alias/alias.ts",
+            "qualifiedName": "U"
+          },
+          "name": "U",
+          "package": "typedoc",
+          "refersToTypeParameter": true
         },
         "falseType": {
           "type": "reference",
-          "id": 11,
-          "name": "T"
+          "target": 11,
+          "name": "T",
+          "package": "typedoc",
+          "refersToTypeParameter": true
         }
       }
     },
     {
       "id": 1,
       "name": "TCompareFunction",
-      "kind": 4194304,
-      "kindString": "Type alias",
+      "variant": "declaration",
+      "kind": 2097152,
       "flags": {},
-      "typeParameter": [
+      "comment": {
+        "summary": [
+          {
+            "kind": "text",
+            "text": "A type that describes a compare function, e.g. for array.sort()."
+          }
+        ]
+      },
+      "sources": [
+        {
+          "fileName": "alias.ts",
+          "line": 6,
+          "character": 12,
+          "url": "typedoc://alias.ts#L6"
+        }
+      ],
+      "typeParameters": [
         {
           "id": 6,
           "name": "T",
+          "variant": "typeParam",
           "kind": 131072,
-          "kindString": "Type parameter",
           "flags": {}
         }
       ],
@@ -112,42 +202,51 @@
         "declaration": {
           "id": 2,
           "name": "__type",
+          "variant": "declaration",
           "kind": 65536,
-          "kindString": "Type literal",
           "flags": {},
+          "sources": [
+            {
+              "fileName": "alias.ts",
+              "line": 6,
+              "character": 34,
+              "url": "typedoc://alias.ts#L6"
+            }
+          ],
           "signatures": [
             {
               "id": 3,
               "name": "__type",
+              "variant": "signature",
               "kind": 4096,
-              "kindString": "Call signature",
               "flags": {},
-              "comment": {
-                "shortText": "A type that describes a compare function, e.g. for array.sort()."
-              },
               "parameters": [
                 {
                   "id": 4,
                   "name": "a",
+                  "variant": "param",
                   "kind": 32768,
-                  "kindString": "Parameter",
                   "flags": {},
                   "type": {
                     "type": "reference",
-                    "id": 6,
-                    "name": "T"
+                    "target": 6,
+                    "name": "T",
+                    "package": "typedoc",
+                    "refersToTypeParameter": true
                   }
                 },
                 {
                   "id": 5,
                   "name": "b",
+                  "variant": "param",
                   "kind": 32768,
-                  "kindString": "Parameter",
                   "flags": {},
                   "type": {
                     "type": "reference",
-                    "id": 6,
-                    "name": "T"
+                    "target": 6,
+                    "name": "T",
+                    "package": "typedoc",
+                    "refersToTypeParameter": true
                   }
                 }
               ],
@@ -163,12 +262,25 @@
     {
       "id": 7,
       "name": "TId",
-      "kind": 4194304,
-      "kindString": "Type alias",
+      "variant": "declaration",
+      "kind": 2097152,
       "flags": {},
       "comment": {
-        "shortText": "A type for IDs."
+        "summary": [
+          {
+            "kind": "text",
+            "text": "A type for IDs."
+          }
+        ]
       },
+      "sources": [
+        {
+          "fileName": "alias.ts",
+          "line": 11,
+          "character": 12,
+          "url": "typedoc://alias.ts#L11"
+        }
+      ],
       "type": {
         "type": "union",
         "types": [
@@ -186,14 +298,77 @@
   ],
   "groups": [
     {
-      "title": "Type aliases",
-      "kind": 4194304,
+      "title": "Type Aliases",
       "children": [
         8,
+        12,
         10,
         1,
         7
       ]
     }
-  ]
+  ],
+  "packageName": "typedoc",
+  "symbolIdMap": {
+    "0": {
+      "sourceFileName": "src/test/converter/alias/alias.ts",
+      "qualifiedName": ""
+    },
+    "1": {
+      "sourceFileName": "src/test/converter/alias/alias.ts",
+      "qualifiedName": "TCompareFunction"
+    },
+    "2": {
+      "sourceFileName": "src/test/converter/alias/alias.ts",
+      "qualifiedName": "__type"
+    },
+    "3": {
+      "sourceFileName": "src/test/converter/alias/alias.ts",
+      "qualifiedName": "__type"
+    },
+    "4": {
+      "sourceFileName": "src/test/converter/alias/alias.ts",
+      "qualifiedName": "a"
+    },
+    "5": {
+      "sourceFileName": "src/test/converter/alias/alias.ts",
+      "qualifiedName": "b"
+    },
+    "6": {
+      "sourceFileName": "src/test/converter/alias/alias.ts",
+      "qualifiedName": "T"
+    },
+    "7": {
+      "sourceFileName": "src/test/converter/alias/alias.ts",
+      "qualifiedName": "TId"
+    },
+    "8": {
+      "sourceFileName": "src/test/converter/alias/alias.ts",
+      "qualifiedName": "IsString"
+    },
+    "9": {
+      "sourceFileName": "src/test/converter/alias/alias.ts",
+      "qualifiedName": "T"
+    },
+    "10": {
+      "sourceFileName": "src/test/converter/alias/alias.ts",
+      "qualifiedName": "PromiseType"
+    },
+    "11": {
+      "sourceFileName": "src/test/converter/alias/alias.ts",
+      "qualifiedName": "T"
+    },
+    "12": {
+      "sourceFileName": "src/test/converter/alias/alias.ts",
+      "qualifiedName": "MergedCrossReference"
+    }
+  },
+  "files": {
+    "entries": {
+      "1": "src/test/converter/alias/alias.ts"
+    },
+    "reflections": {
+      "1": 0
+    }
+  }
 }

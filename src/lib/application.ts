@@ -1,43 +1,64 @@
 import * as Path from "path";
-import * as ts from "typescript";
+import ts from "typescript";
 
-import { Converter } from "./converter/index";
-import { Renderer } from "./output/renderer";
-import { Serializer } from "./serialization";
-import type { ProjectReflection } from "./models/index";
+import {
+    Deserializer,
+    type JSONOutput,
+    Serializer,
+} from "./serialization/index.js";
+import { Converter } from "./converter/index.js";
+import { Renderer } from "./output/renderer.js";
+import type { ProjectReflection } from "./models/index.js";
 import {
     Logger,
     ConsoleLogger,
-    CallbackLogger,
     loadPlugins,
     writeFile,
-    discoverPlugins,
-    NeverIfInternal,
+    type OptionsReader,
     TSConfigReader,
-} from "./utils/index";
-
-import {
+    TypeDocReader,
+    PackageJsonReader,
     AbstractComponent,
-    ChildableComponent,
-    Component,
-} from "./utils/component";
-import { Options, BindOption } from "./utils";
-import type { TypeDocOptions } from "./utils/options/declaration";
-import { flatMap, unique } from "./utils/array";
-import { validateExports } from "./validation/exports";
+} from "./utils/index.js";
+
+import { Options, Option } from "./utils/index.js";
+import type { TypeDocOptions } from "./utils/options/declaration.js";
+import { unique } from "./utils/array.js";
 import { ok } from "assert";
 import {
-    DocumentationEntryPoint,
+    type DocumentationEntryPoint,
     EntryPointStrategy,
     getEntryPoints,
+    getPackageDirectories,
     getWatchEntryPoints,
-} from "./utils/entry-point";
-import { nicePath } from "./utils/paths";
-import { hasBeenLoadedMultipleTimes } from "./utils/general";
-import { validateDocumentation } from "./validation/documentation";
+    inferEntryPoints,
+} from "./utils/entry-point.js";
+import { nicePath } from "./utils/paths.js";
+import { getLoadedPaths, hasBeenLoadedMultipleTimes } from "./utils/general.js";
+import { validateExports } from "./validation/exports.js";
+import { validateDocumentation } from "./validation/documentation.js";
+import { validateLinks } from "./validation/links.js";
+import { ApplicationEvents } from "./application-events.js";
+import { findTsConfigFile } from "./utils/tsconfig.js";
+import { deriveRootDir, glob, readFile } from "./utils/fs.js";
+import { addInferredDeclarationMapPaths } from "./models/reflections/ReflectionSymbolId.js";
+import {
+    Internationalization,
+    type TranslatedString,
+} from "./internationalization/internationalization.js";
+import { ValidatingFileRegistry, FileRegistry } from "./models/FileRegistry.js";
+import { readFileSync } from "fs";
+import { fileURLToPath } from "url";
+import { createRequire } from "module";
+import { Outputs } from "./output/output.js";
+import { validateMergeModuleWith } from "./validation/unusedMergeModuleWith.js";
 
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const packageInfo = require("../../package.json") as {
+const packageInfo = JSON.parse(
+    readFileSync(
+        Path.join(fileURLToPath(import.meta.url), "../../../package.json"),
+        "utf8",
+    ),
+) as {
     version: string;
     peerDependencies: { typescript: string };
 };
@@ -45,6 +66,27 @@ const packageInfo = require("../../package.json") as {
 const supportedVersionMajorMinor = packageInfo.peerDependencies.typescript
     .split("||")
     .map((version) => version.replace(/^\s*|\.x\s*$/g, ""));
+
+const DETECTOR = Symbol();
+
+export function createAppForTesting(): Application {
+    // @ts-expect-error private constructor
+    const app: Application = new Application(DETECTOR);
+    app.files = new FileRegistry();
+    return app;
+}
+
+const DEFAULT_READERS = [
+    new TypeDocReader(),
+    new PackageJsonReader(),
+    new TSConfigReader(),
+];
+
+export interface ApplicationEvents {
+    bootstrapEnd: [Application];
+    reviveProject: [ProjectReflection];
+    validateProject: [ProjectReflection];
+}
 
 /**
  * The default TypeDoc main application class.
@@ -58,131 +100,257 @@ const supportedVersionMajorMinor = packageInfo.peerDependencies.typescript
  *
  * Both the {@link Converter} and the {@link Renderer} emit a series of events while processing the project.
  * Subscribe to these Events to control the application flow or alter the output.
+ *
+ * @remarks
+ *
+ * Access to an Application instance can be retrieved with {@link Application.bootstrap} or
+ * {@link Application.bootstrapWithPlugins}. It can not be constructed manually.
+ *
+ * @group Common
+ * @summary Root level class which contains most useful behavior.
  */
-@Component({ name: "application", internal: true })
-export class Application extends ChildableComponent<
+export class Application extends AbstractComponent<
     Application,
-    AbstractComponent<Application>
+    ApplicationEvents
 > {
     /**
      * The converter used to create the declaration reflections.
      */
     converter: Converter;
 
+    outputs = new Outputs(this);
+
     /**
-     * The renderer used to generate the documentation output.
+     * The renderer used to generate the HTML documentation output.
      */
     renderer: Renderer;
 
     /**
      * The serializer used to generate JSON output.
      */
-    serializer: Serializer;
+    serializer = new Serializer();
+
+    /**
+     * The deserializer used to restore previously serialized JSON output.
+     */
+    deserializer = new Deserializer(this);
 
     /**
      * The logger that should be used to output messages.
      */
-    logger: Logger;
+    logger: Logger = new ConsoleLogger();
 
-    options: Options;
+    /**
+     * Internationalization module which supports translating according to
+     * the `lang` option.
+     */
+    internationalization = new Internationalization(this);
+
+    /**
+     * Proxy based shortcuts for internationalization keys.
+     */
+    i18n = this.internationalization.proxy;
+
+    options = new Options(this.i18n);
+
+    files: FileRegistry = new ValidatingFileRegistry();
 
     /** @internal */
-    @BindOption("logger")
-    loggerType!: string | Function;
+    @Option("lang")
+    accessor lang!: string;
+
+    /** @internal */
+    @Option("skipErrorChecking")
+    accessor skipErrorChecking!: boolean;
+
+    /** @internal */
+    @Option("entryPointStrategy")
+    accessor entryPointStrategy!: EntryPointStrategy;
+
+    /** @internal */
+    @Option("entryPoints")
+    accessor entryPoints!: string[];
 
     /**
      * The version number of TypeDoc.
      */
-    static VERSION = packageInfo.version;
+    static readonly VERSION = packageInfo.version;
+
+    /**
+     * Emitted after plugins have been loaded and options have been read, but before they have been frozen.
+     * The listener will be given an instance of {@link Application}.
+     */
+    static readonly EVENT_BOOTSTRAP_END = ApplicationEvents.BOOTSTRAP_END;
+
+    /**
+     * Emitted after a project has been deserialized from JSON.
+     * The listener will be given an instance of {@link ProjectReflection}.
+     */
+    static readonly EVENT_PROJECT_REVIVE = ApplicationEvents.REVIVE;
+
+    /**
+     * Emitted when validation is being run.
+     * The listener will be given an instance of {@link ProjectReflection}.
+     */
+    static readonly EVENT_VALIDATE_PROJECT = ApplicationEvents.VALIDATE_PROJECT;
 
     /**
      * Create a new TypeDoc application instance.
-     *
-     * @param options An object containing the options that should be used.
      */
-    constructor() {
+    private constructor(detector: typeof DETECTOR) {
+        if (detector !== DETECTOR) {
+            throw new Error(
+                "An application handle must be retrieved with Application.bootstrap or Application.bootstrapWithPlugins",
+            );
+        }
         super(null!); // We own ourselves
 
-        this.logger = new ConsoleLogger();
-        this.options = new Options(this.logger);
-        this.options.addDefaultDeclarations();
-        this.serializer = new Serializer();
-        this.converter = this.addComponent<Converter>("converter", Converter);
-        this.renderer = this.addComponent<Renderer>("renderer", Renderer);
+        this.converter = new Converter(this);
+        this.renderer = new Renderer(this);
+        this.logger.i18n = this.i18n;
+
+        this.outputs.addOutput("json", async (out, project) => {
+            const ser = this.serializer.projectToObject(project, process.cwd());
+            const space = this.options.getValue("pretty") ? "\t" : "";
+            await writeFile(out, JSON.stringify(ser, null, space) + "\n");
+        });
+
+        this.outputs.addOutput("html", async (out, project) => {
+            await this.renderer.render(project, out);
+        });
     }
 
     /**
-     * Initialize TypeDoc with the given options object.
-     *
-     * @param options  The desired options to set.
+     * Initialize TypeDoc, loading plugins if applicable.
      */
-    bootstrap(options: Partial<TypeDocOptions> = {}): void {
-        for (const [key, val] of Object.entries(options)) {
-            try {
-                this.options.setValue(key as keyof TypeDocOptions, val);
-            } catch {
-                // Ignore errors, plugins haven't been loaded yet and may declare an option.
-            }
-        }
-        this.options.read(new Logger());
+    static async bootstrapWithPlugins(
+        options: Partial<TypeDocOptions> = {},
+        readers: readonly OptionsReader[] = DEFAULT_READERS,
+    ): Promise<Application> {
+        const app = new Application(DETECTOR);
+        readers.forEach((r) => app.options.addReader(r));
+        app.options.reset();
+        app.setOptions(options, /* reportErrors */ false);
+        await app.options.read(new Logger());
+        app.logger.level = app.options.getValue("logLevel");
 
-        const logger = this.loggerType;
-        if (typeof logger === "function") {
-            this.logger = new CallbackLogger(<any>logger);
-            this.options.setLogger(this.logger);
-        } else if (logger === "none") {
-            this.logger = new Logger();
-            this.options.setLogger(this.logger);
-        }
-        this.logger.level = this.options.getValue("logLevel");
+        await loadPlugins(app, app.options.getValue("plugin"));
 
-        const plugins = discoverPlugins(this);
-        loadPlugins(this, plugins);
+        await app._bootstrap(options);
+        return app;
+    }
 
+    /**
+     * Initialize TypeDoc without loading plugins.
+     *
+     * @example
+     * Initialize the application with pretty-printing output disabled.
+     * ```ts
+     * const app = Application.bootstrap({ pretty: false });
+     * ```
+     *
+     * @param options Options to set during initialization
+     * @param readers Option readers to use to discover options from config files.
+     */
+    static async bootstrap(
+        options: Partial<TypeDocOptions> = {},
+        readers: readonly OptionsReader[] = DEFAULT_READERS,
+    ): Promise<Application> {
+        const app = new Application(DETECTOR);
+        readers.forEach((r) => app.options.addReader(r));
+        await app._bootstrap(options);
+        return app;
+    }
+
+    private async _bootstrap(options: Partial<TypeDocOptions>) {
         this.options.reset();
-        for (const [key, val] of Object.entries(options)) {
-            try {
-                this.options.setValue(key as keyof TypeDocOptions, val);
-            } catch (error) {
-                ok(error instanceof Error);
-                this.logger.error(error.message);
-            }
+        this.setOptions(options, /* reportErrors */ false);
+        await this.options.read(this.logger);
+        this.setOptions(options);
+        this.logger.level = this.options.getValue("logLevel");
+        for (const [lang, locales] of Object.entries(
+            this.options.getValue("locales"),
+        )) {
+            this.internationalization.addTranslations(lang, locales);
         }
-        this.options.read(this.logger);
 
         if (hasBeenLoadedMultipleTimes()) {
             this.logger.warn(
-                `TypeDoc has been loaded multiple times. This is commonly caused by plugins which have their own installation of TypeDoc. This will likely break things.`
+                this.i18n.loaded_multiple_times_0(
+                    getLoadedPaths().join("\n\t"),
+                ),
             );
+        }
+        this.trigger(ApplicationEvents.BOOTSTRAP_END, this);
+
+        if (!this.internationalization.hasTranslations(this.lang)) {
+            // Not internationalized as by definition we don't know what to include here.
+            this.logger.warn(
+                `Options specified "${this.lang}" as the language to use, but TypeDoc does not support it.` as TranslatedString,
+            );
+            this.logger.info(
+                ("The supported languages are:\n\t" +
+                    this.internationalization
+                        .getSupportedLanguages()
+                        .join("\n\t")) as TranslatedString,
+            );
+            this.logger.info(
+                "You can define/override local locales with the `locales` option, or contribute them to TypeDoc!" as TranslatedString,
+            );
+        }
+
+        if (
+            this.options.getValue("useHostedBaseUrlForAbsoluteLinks") &&
+            !this.options.getValue("hostedBaseUrl")
+        ) {
+            this.logger.warn(
+                this.i18n.useHostedBaseUrlForAbsoluteLinks_requires_hostedBaseUrl(),
+            );
+            this.options.setValue("useHostedBaseUrlForAbsoluteLinks", false);
         }
     }
 
-    /**
-     * Return the application / root component instance.
-     */
-    override get application(): NeverIfInternal<Application> {
-        this.logger.deprecated(
-            "Application.application is deprecated. Plugins are now passed the application instance when loaded."
-        );
-        return this as never;
+    /** @internal */
+    setOptions(options: Partial<TypeDocOptions>, reportErrors = true) {
+        let success = true;
+        for (const [key, val] of Object.entries(options)) {
+            try {
+                this.options.setValue(key as never, val as never);
+            } catch (error) {
+                success = false;
+                ok(error instanceof Error);
+                if (reportErrors) {
+                    this.logger.error(error.message as TranslatedString);
+                }
+            }
+        }
+        return success;
     }
 
     /**
      * Return the path to the TypeScript compiler.
      */
     public getTypeScriptPath(): string {
-        return nicePath(Path.dirname(require.resolve("typescript")));
+        const req = createRequire(import.meta.url);
+        return nicePath(Path.dirname(req.resolve("typescript")));
     }
 
     public getTypeScriptVersion(): string {
         return ts.version;
     }
 
+    public getEntryPoints(): DocumentationEntryPoint[] | undefined {
+        if (this.options.isSet("entryPoints")) {
+            return this.getDefinedEntryPoints();
+        }
+        return inferEntryPoints(this.logger, this.options);
+    }
+
     /**
      * Gets the entry points to be documented according to the current `entryPoints` and `entryPointStrategy` options.
      * May return undefined if entry points fail to be expanded.
      */
-    public getEntryPoints(): DocumentationEntryPoint[] | undefined {
+    public getDefinedEntryPoints(): DocumentationEntryPoint[] | undefined {
         return getEntryPoints(this.logger, this.options);
     }
 
@@ -191,24 +359,29 @@ export class Application extends ChildableComponent<
      *
      * @returns An instance of ProjectReflection on success, undefined otherwise.
      */
-    public convert(): ProjectReflection | undefined {
+    public async convert(): Promise<ProjectReflection | undefined> {
         const start = Date.now();
-        // We seal here rather than in the Converter class since TypeDoc's tests reuse the Application
-        // with a few different settings.
-        this.options.freeze();
         this.logger.verbose(
-            `Using TypeScript ${this.getTypeScriptVersion()} from ${this.getTypeScriptPath()}`
+            `Using TypeScript ${this.getTypeScriptVersion()} from ${this.getTypeScriptPath()}`,
         );
+
+        if (this.entryPointStrategy === EntryPointStrategy.Merge) {
+            return this._merge();
+        }
+
+        if (this.entryPointStrategy === EntryPointStrategy.Packages) {
+            return this._convertPackages();
+        }
 
         if (
             !supportedVersionMajorMinor.some(
-                (version) => version == ts.versionMajorMinor
+                (version) => version == ts.versionMajorMinor,
             )
         ) {
             this.logger.warn(
-                `You are running with an unsupported TypeScript version! TypeDoc supports ${supportedVersionMajorMinor.join(
-                    ", "
-                )}`
+                this.i18n.unsupported_ts_version_0(
+                    supportedVersionMajorMinor.join(", "),
+                ),
             );
         }
 
@@ -221,19 +394,20 @@ export class Application extends ChildableComponent<
 
         const programs = unique(entryPoints.map((e) => e.program));
         this.logger.verbose(
-            `Converting with ${programs.length} programs ${entryPoints.length} entry points`
+            `Converting with ${programs.length} programs ${entryPoints.length} entry points`,
         );
 
-        const errors = flatMap([...programs], ts.getPreEmitDiagnostics);
-        if (errors.length) {
-            this.logger.diagnostics(errors);
-            return;
+        if (this.skipErrorChecking === false) {
+            const errors = programs.flatMap((program) =>
+                ts.getPreEmitDiagnostics(program),
+            );
+            if (errors.length) {
+                this.logger.diagnostics(errors);
+                return;
+            }
         }
 
-        if (
-            this.options.getValue("emit") === "both" ||
-            this.options.getValue("emit") === true
-        ) {
+        if (this.options.getValue("emit") === "both") {
             for (const program of programs) {
                 program.emit();
             }
@@ -241,20 +415,19 @@ export class Application extends ChildableComponent<
 
         const startConversion = Date.now();
         this.logger.verbose(
-            `Finished getting entry points in ${Date.now() - start}ms`
+            `Finished getting entry points in ${Date.now() - start}ms`,
         );
 
         const project = this.converter.convert(entryPoints);
         this.logger.verbose(
-            `Finished conversion in ${Date.now() - startConversion}ms`
+            `Finished conversion in ${Date.now() - startConversion}ms`,
         );
         return project;
     }
 
     public convertAndWatch(
-        success: (project: ProjectReflection) => Promise<void>
+        success: (project: ProjectReflection) => Promise<void>,
     ): void {
-        this.options.freeze();
         if (
             !this.options.getValue("preserveWatchOutput") &&
             this.logger instanceof ConsoleLogger
@@ -263,49 +436,43 @@ export class Application extends ChildableComponent<
         }
 
         this.logger.verbose(
-            `Using TypeScript ${this.getTypeScriptVersion()} from ${this.getTypeScriptPath()}`
+            `Using TypeScript ${this.getTypeScriptVersion()} from ${this.getTypeScriptPath()}`,
         );
 
         if (
             !supportedVersionMajorMinor.some(
-                (version) => version == ts.versionMajorMinor
+                (version) => version == ts.versionMajorMinor,
             )
         ) {
             this.logger.warn(
-                `You are running with an unsupported TypeScript version! TypeDoc supports ${supportedVersionMajorMinor.join(
-                    ", "
-                )}`
+                this.i18n.unsupported_ts_version_0(
+                    supportedVersionMajorMinor.join(", "),
+                ),
             );
         }
 
         if (Object.keys(this.options.getCompilerOptions()).length === 0) {
-            this.logger.warn(
-                `No compiler options set. This likely means that TypeDoc did not find your tsconfig.json. Generated documentation will probably be empty.`
-            );
+            this.logger.warn(this.i18n.no_compiler_options_set());
         }
 
         // Doing this is considerably more complicated, we'd need to manage an array of programs, not convert until all programs
         // have reported in the first time... just error out for now. I'm not convinced anyone will actually notice.
         if (this.options.getFileNames().length === 0) {
-            this.logger.error(
-                "The provided tsconfig file looks like a solution style tsconfig, which is not supported in watch mode."
-            );
+            this.logger.error(this.i18n.solution_not_supported_in_watch_mode());
             return;
         }
 
         // Support for packages mode is currently unimplemented
         if (
-            this.options.getValue("entryPointStrategy") ===
-            EntryPointStrategy.Packages
+            this.entryPointStrategy !== EntryPointStrategy.Resolve &&
+            this.entryPointStrategy !== EntryPointStrategy.Expand
         ) {
-            this.logger.error(
-                "The packages option of entryPointStrategy is not supported in watch mode."
-            );
+            this.logger.error(this.i18n.strategy_not_supported_in_watch_mode());
             return;
         }
 
         const tsconfigFile =
-            TSConfigReader.findConfigFile(this.options.getValue("tsconfig")) ??
+            findTsConfigFile(this.options.getValue("tsconfig")) ??
             "tsconfig.json";
 
         // We don't want to do it the first time to preserve initial debug status messages. They'll be lost
@@ -329,9 +496,12 @@ export class Application extends ChildableComponent<
                 }
                 firstStatusReport = false;
                 this.logger.info(
-                    ts.flattenDiagnosticMessageText(status.messageText, newLine)
+                    ts.flattenDiagnosticMessageText(
+                        status.messageText,
+                        newLine,
+                    ) as TranslatedString,
                 );
-            }
+            },
         );
 
         let successFinished = true;
@@ -343,10 +513,7 @@ export class Application extends ChildableComponent<
             }
 
             if (successFinished) {
-                if (
-                    this.options.getValue("emit") === "both" ||
-                    this.options.getValue("emit") === true
-                ) {
+                if (this.options.getValue("emit") === "both") {
                     currentProgram.emit();
                 }
 
@@ -355,7 +522,7 @@ export class Application extends ChildableComponent<
                 const entryPoints = getWatchEntryPoints(
                     this.logger,
                     this.options,
-                    currentProgram
+                    currentProgram,
                 );
                 if (!entryPoints) {
                     return;
@@ -377,7 +544,7 @@ export class Application extends ChildableComponent<
             host,
             oldProgram,
             configDiagnostics,
-            references
+            references,
         ) => {
             // If we always do this, we'll get a crash the second time a program is created.
             if (rootNames !== undefined) {
@@ -390,7 +557,7 @@ export class Application extends ChildableComponent<
                 host,
                 oldProgram,
                 configDiagnostics,
-                references
+                references,
             );
         };
 
@@ -408,12 +575,18 @@ export class Application extends ChildableComponent<
 
     validate(project: ProjectReflection) {
         const checks = this.options.getValue("validation");
+        const start = Date.now();
 
-        if (checks.notExported) {
+        // No point in validating exports when merging. Warnings will have already been emitted when
+        // creating the project jsons that this run merges together.
+        if (
+            checks.notExported &&
+            this.entryPointStrategy !== EntryPointStrategy.Merge
+        ) {
             validateExports(
                 project,
                 this.logger,
-                this.options.getValue("intentionallyNotExported")
+                this.options.getValue("intentionallyNotExported"),
             );
         }
 
@@ -421,13 +594,28 @@ export class Application extends ChildableComponent<
             validateDocumentation(
                 project,
                 this.logger,
-                this.options.getValue("requiredToBeDocumented")
+                this.options.getValue("requiredToBeDocumented"),
             );
         }
 
-        // checks.invalidLink is currently handled when rendering by the MarkedLinksPlugin.
-        // It should really move here, but I'm putting that off until done refactoring the comment
-        // parsing so that we don't have duplicate parse logic all over the place.
+        if (checks.invalidLink) {
+            validateLinks(project, this.logger);
+        }
+
+        if (checks.unusedMergeModuleWith) {
+            validateMergeModuleWith(project, this.logger);
+        }
+
+        this.trigger(Application.EVENT_VALIDATE_PROJECT, project);
+
+        this.logger.verbose(`Validation took ${Date.now() - start}ms`);
+    }
+
+    /**
+     * Render outputs selected with options for the specified project
+     */
+    public async generateOutputs(project: ProjectReflection): Promise<void> {
+        await this.outputs.writeOutputs(project);
     }
 
     /**
@@ -435,46 +623,34 @@ export class Application extends ChildableComponent<
      */
     public async generateDocs(
         project: ProjectReflection,
-        out: string
+        out: string,
     ): Promise<void> {
-        const start = Date.now();
-        out = Path.resolve(out);
-        await this.renderer.render(project, out);
-        if (this.logger.hasErrors()) {
-            this.logger.error(
-                "Documentation could not be generated due to the errors above."
-            );
-        } else {
-            this.logger.info(`Documentation generated at ${nicePath(out)}`);
-            this.logger.verbose(`HTML rendering took ${Date.now() - start}ms`);
-        }
+        await this.outputs.writeOutput(
+            {
+                name: "html",
+                path: out,
+            },
+            project,
+        );
     }
 
     /**
-     * Run the converter for the given set of files and write the reflections to a json file.
+     * Write the reflections to a json file.
      *
      * @param out The path and file name of the target file.
      * @returns Whether the JSON file could be written successfully.
      */
     public async generateJson(
         project: ProjectReflection,
-        out: string
+        out: string,
     ): Promise<void> {
-        const start = Date.now();
-        out = Path.resolve(out);
-        const eventData = {
-            outputDirectory: Path.dirname(out),
-            outputFile: Path.basename(out),
-        };
-        const ser = this.serializer.projectToObject(project, {
-            begin: eventData,
-            end: eventData,
-        });
-
-        const space = this.options.getValue("pretty") ? "\t" : "";
-        await writeFile(out, JSON.stringify(ser, null, space));
-        this.logger.info(`JSON written to ${nicePath(out)}`);
-        this.logger.verbose(`JSON rendering took ${Date.now() - start}ms`);
+        await this.outputs.writeOutput(
+            {
+                name: "json",
+                path: out,
+            },
+            project,
+        );
     }
 
     /**
@@ -487,5 +663,170 @@ export class Application extends ChildableComponent<
             `Using TypeScript ${this.getTypeScriptVersion()} from ${this.getTypeScriptPath()}`,
             "",
         ].join("\n");
+    }
+
+    private async _convertPackages(): Promise<ProjectReflection | undefined> {
+        if (!this.options.isSet("entryPoints")) {
+            this.logger.error(this.i18n.no_entry_points_for_packages());
+            return;
+        }
+
+        const packageDirs = getPackageDirectories(
+            this.logger,
+            this.options,
+            this.options.getValue("entryPoints"),
+        );
+
+        if (packageDirs.length === 0) {
+            this.logger.error(this.i18n.failed_to_find_packages());
+            return;
+        }
+
+        const origFiles = this.files;
+        const origOptions = this.options;
+        const projects: JSONOutput.ProjectReflection[] = [];
+
+        const projectsToConvert: { dir: string; options: Options }[] = [];
+        // Generate a json file for each package
+        for (const dir of packageDirs) {
+            this.logger.verbose(`Reading project at ${nicePath(dir)}`);
+            let opts: Options;
+            try {
+                opts = origOptions.copyForPackage(dir);
+            } catch (error) {
+                ok(error instanceof Error);
+                this.logger.error(error.message as TranslatedString);
+                this.logger.info(
+                    this.i18n.previous_error_occurred_when_reading_options_for_0(
+                        nicePath(dir),
+                    ),
+                );
+                continue;
+            }
+
+            await opts.read(this.logger, dir);
+            // Invalid links should only be reported after everything has been merged.
+            // Same goes for @mergeModuleWith, should only be validated after merging
+            // everything together.
+            opts.setValue("validation", {
+                invalidLink: false,
+                unusedMergeModuleWith: false,
+            });
+            if (
+                opts.getValue("entryPointStrategy") ===
+                EntryPointStrategy.Packages
+            ) {
+                this.logger.error(
+                    this.i18n.nested_packages_unsupported_0(nicePath(dir)),
+                );
+                continue;
+            }
+
+            addInferredDeclarationMapPaths(
+                opts.getCompilerOptions(),
+                opts.getFileNames(),
+            );
+
+            projectsToConvert.push({ dir, options: opts });
+        }
+
+        for (const { dir, options } of projectsToConvert) {
+            this.logger.info(this.i18n.converting_project_at_0(nicePath(dir)));
+            this.options = options;
+            this.files = new ValidatingFileRegistry();
+            let project = await this.convert();
+            if (project) {
+                this.validate(project);
+                const serialized = this.serializer.projectToObject(
+                    project,
+                    process.cwd(),
+                );
+                projects.push(serialized);
+            }
+
+            // When debugging memory issues, it's useful to set these
+            // here so that a breakpoint on the continue statement below
+            // gets the memory as it ought to be with all TS objects released.
+            project = undefined;
+            this.files = undefined!;
+            // global.gc!();
+
+            continue;
+        }
+
+        this.options = origOptions;
+        this.files = origFiles;
+
+        if (projects.length !== packageDirs.length) {
+            this.logger.error(this.i18n.failed_to_convert_packages());
+            return;
+        }
+
+        this.logger.info(this.i18n.merging_converted_projects());
+        const result = this.deserializer.reviveProjects(
+            this.options.getValue("name") || "Documentation",
+            projects,
+            {
+                projectRoot: process.cwd(),
+                registry: this.files,
+                addProjectDocuments: true,
+            },
+        );
+        this.trigger(ApplicationEvents.REVIVE, result);
+        return result;
+    }
+
+    private _merge(): ProjectReflection | undefined {
+        const start = Date.now();
+
+        if (!this.options.isSet("entryPoints")) {
+            this.logger.error(this.i18n.no_entry_points_to_merge());
+            return;
+        }
+
+        const rootDir = deriveRootDir(this.entryPoints);
+        const entryPoints = this.entryPoints.flatMap((entry) => {
+            const result = glob(entry, rootDir);
+
+            if (result.length === 0) {
+                this.logger.warn(
+                    this.i18n.entrypoint_did_not_match_files_0(nicePath(entry)),
+                );
+            } else if (result.length !== 1) {
+                this.logger.verbose(
+                    `Expanded ${nicePath(entry)} to:\n\t${result
+                        .map(nicePath)
+                        .join("\n\t")}`,
+                );
+            }
+
+            return result;
+        });
+
+        const jsonProjects = entryPoints.map((path) => {
+            try {
+                return JSON.parse(readFile(path));
+            } catch {
+                this.logger.error(
+                    this.i18n.failed_to_parse_json_0(nicePath(path)),
+                );
+                return null;
+            }
+        });
+        if (this.logger.hasErrors()) return;
+
+        const result = this.deserializer.reviveProjects(
+            this.options.getValue("name"),
+            jsonProjects,
+            {
+                projectRoot: process.cwd(),
+                registry: this.files,
+                addProjectDocuments: true,
+            },
+        );
+        this.logger.verbose(`Reviving projects took ${Date.now() - start}ms`);
+
+        this.trigger(ApplicationEvents.REVIVE, result);
+        return result;
     }
 }

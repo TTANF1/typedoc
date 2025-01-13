@@ -5,30 +5,38 @@ export {
     removeIf,
     removeIfPresent,
     unique,
-} from "./array";
-export { AbstractComponent, ChildableComponent, Component } from "./component";
-export { Event, EventDispatcher } from "./events";
+} from "./array.js";
+export { AbstractComponent } from "./component.js";
+export * from "./enum.js";
+export { EventDispatcher } from "./events.js";
 export {
+    isFile,
     copy,
     copySync,
     getCommonDirectory,
-    normalizePath,
     readFile,
-    remove,
     writeFile,
     writeFileSync,
-} from "./fs";
-export type { IfInternal, NeverIfInternal } from "./general";
-export { CallbackLogger, ConsoleLogger, Logger, LogLevel } from "./loggers";
+    discoverInParentDir,
+    discoverPackageJson,
+} from "./fs.js";
+export { normalizePath } from "./paths.js";
+export type { IfInternal, NeverIfInternal, Chars } from "./general.js";
+export { assertNever, TYPEDOC_ROOT } from "./general.js";
+export { ConsoleLogger, Logger, LogLevel } from "./loggers.js";
+export { DefaultMap } from "./map.js";
 export {
     ArgumentsReader,
-    BindOption,
+    Option,
+    CommentStyle,
     Options,
+    PackageJsonReader,
     ParameterHint,
     ParameterType,
     TSConfigReader,
     TypeDocReader,
-} from "./options";
+    OptionDefaults,
+} from "./options/index.js";
 export type {
     ArrayDeclarationOption,
     BooleanDeclarationOption,
@@ -40,6 +48,7 @@ export type {
     MixedDeclarationOption,
     NumberDeclarationOption,
     FlagsDeclarationOption,
+    ObjectDeclarationOption,
     OptionsReader,
     StringDeclarationOption,
     TypeDocOptionMap,
@@ -47,15 +56,24 @@ export type {
     ValidationOptions,
     TypeDocOptionValues,
     ParameterTypeToOptionTypeMap,
-} from "./options";
-export { discoverPlugins, loadPlugins } from "./plugins";
-export { sortReflections } from "./sort";
-export type { SortStrategy } from "./sort";
+    ManuallyValidatedOption,
+    JsDocCompatibility,
+    OutputSpecification,
+} from "./options/index.js";
+export { loadPlugins } from "./plugins.js";
+export { getSortFunction } from "./sort.js";
+export type { SortStrategy } from "./sort.js";
 
-export { EventHooks } from "./hooks";
+export { EventHooks } from "./hooks.js";
 
-export * from "./entry-point";
+export * from "./entry-point.js";
 
-import * as JSX from "./jsx";
+import * as JSX from "./jsx.js";
 export { JSX };
-export { Fragment, Raw, renderElement } from "./jsx";
+export { Fragment, Raw, renderElement } from "./jsx.js";
+
+export * as Validation from "./validation.js";
+
+export * from "./tsutils.js";
+
+export { MinimalSourceFile } from "./minimalSourceFile.js";

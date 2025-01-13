@@ -15,14 +15,12 @@ export { a as b };
 /**
  * An export with a module specifier that comes from this file.
  */
-export { a as c } from "./mod";
+export { a as c } from "./mod.js";
 
 /**
  * Will not be re-exported from export.ts using export * from...
  */
-export default function () {
-    console.log("Default");
-}
+export default function () {}
 
 /**
  * This is annotated with the hidden tag and will therefore not be included in the generated documentation.
@@ -39,6 +37,6 @@ export const hidden = true;
 export { Node } from "typescript";
 
 // TS 3.8 namespace exports
-export * as ThisModule from "./mod";
+export * as ThisModule from "./mod.js";
 
 export type GH1453Helper = `1`;

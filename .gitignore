@@ -1,8 +1,10 @@
 .DS_Store
 .idea
+.vs
 .tscache
 .baseDir.js
 .baseDir.ts
+*.swp
 yarn.lock
 .nyc_output
 yarn-error.log
@@ -10,11 +12,17 @@ yarn-error.log
 /src/test/renderer/*/doc
 /src/test/renderer/testProject/json.json
 **/node_modules/
+!src/test/converter2/behavior/node_modules/
 /coverage/
 /dist/
+/docs
+/docs-site
+/docs2
+/td*.json
 
 typedoc*.tgz
 tmp
+/*.0x/
 
 src/test/renderer/specs/assets/*
 src/test/renderer/specs/specs.json

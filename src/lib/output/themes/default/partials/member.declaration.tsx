@@ -1,44 +1,53 @@
-import { DeclarationReflection, ReflectionType } from "../../../../models";
-import { JSX } from "../../../../utils";
-import { renderTypeParametersSignature, wbr } from "../../lib";
-import type { DefaultThemeRenderContext } from "../DefaultThemeRenderContext";
+import type { DeclarationReflection } from "../../../../models/index.js";
+import { JSX } from "../../../../utils/index.js";
+import { FormattedCodeBuilder, FormattedCodeGenerator, Wrap, type FormatterNode } from "../../../formatter.js";
+import { hasTypeParameters } from "../../lib.js";
+import type { DefaultThemeRenderContext } from "../DefaultThemeRenderContext.js";
 
-export const memberDeclaration = (context: DefaultThemeRenderContext, props: DeclarationReflection) => (
-    <>
-        <div class="tsd-signature tsd-kind-icon">
-            {wbr(props.name)}
-            {renderTypeParametersSignature(props.typeParameters)}
-            {props.type && (
-                <>
-                    <span class="tsd-signature-symbol">{!!props.flags.isOptional && "?"}:</span>{" "}
-                    {context.type(props.type)}
-                </>
-            )}
-            {!!props.defaultValue && (
-                <>
-                    <span class="tsd-signature-symbol">
-                        {" = "}
-                        {props.defaultValue}
-                    </span>
-                </>
-            )}
-        </div>
+export function memberDeclaration(context: DefaultThemeRenderContext, props: DeclarationReflection) {
+    const builder = new FormattedCodeBuilder(context.urlTo);
+    const content: FormatterNode[] = [];
+    builder.member(content, props, { topLevelLinks: false });
+    const generator = new FormattedCodeGenerator(context.options.getValue("typePrintWidth"));
+    generator.node({ type: "nodes", content }, Wrap.Detect);
 
-        {context.memberSources(props)}
+    /** Fix for #2717. If type is the same as value the default value is omitted */
+    function shouldRenderDefaultValue() {
+        if (props.type && props.type.type === "literal") {
+            const reflectionTypeString = props.type.toString();
 
-        {context.comment(props)}
+            const defaultValue = props.defaultValue;
 
-        {!!props.typeParameters && (
-            <>
-                <h4 class="tsd-type-parameters-title">Type parameters</h4>
-                {context.typeParameters(props.typeParameters)}
-            </>
-        )}
-        {props.type instanceof ReflectionType && (
-            <div class="tsd-type-declaration">
-                <h4>Type declaration</h4>
-                {context.parameter(props.type.declaration)}
+            if (defaultValue === undefined || reflectionTypeString === defaultValue.toString()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    return (
+        <>
+            <div class="tsd-signature">
+                {generator.toElement()}
+                {!!props.defaultValue && shouldRenderDefaultValue() && (
+                    <>
+                        <span class="tsd-signature-symbol">
+                            {" = "}
+                            {props.defaultValue}
+                        </span>
+                    </>
+                )}
             </div>
-        )}
-    </>
-);
+
+            {context.commentSummary(props)}
+
+            {hasTypeParameters(props) && context.typeParameters(props.typeParameters)}
+
+            {props.type && context.typeDeclaration(props.type)}
+
+            {context.commentTags(props)}
+
+            {context.memberSources(props)}
+        </>
+    );
+}

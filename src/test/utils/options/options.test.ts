@@ -1,68 +1,74 @@
-import { Logger, LogLevel, Options, ParameterType } from "../../../lib/utils";
+import { LogLevel, Options, ParameterType } from "../../../lib/utils/index.js";
 import {
-    BindOption,
-    MapDeclarationOption,
-    NumberDeclarationOption,
-} from "../../../lib/utils/options";
+    Option,
+    type MapDeclarationOption,
+    type NumberDeclarationOption,
+} from "../../../lib/utils/index.js";
 import { deepStrictEqual as equal, throws } from "assert";
 import type {
     DeclarationOption,
     EmitStrategy,
-} from "../../../lib/utils/options";
+} from "../../../lib/utils/options/index.js";
+import { Internationalization } from "../../../lib/internationalization/internationalization.js";
 
 describe("Options", () => {
-    const logger = new Logger();
-    const options = new Options(logger) as Options & {
+    let options: Options & {
         addDeclaration(declaration: Readonly<DeclarationOption>): void;
         getValue(name: string): unknown;
     };
-    options.addDefaultDeclarations();
-    options.addDeclaration({
-        name: "mapped",
-        type: ParameterType.Map,
-        map: { a: 1 },
-        defaultValue: 2,
-        help: "",
+
+    beforeEach(() => {
+        options = new Options(new Internationalization(null).proxy);
+        options.addDeclaration({
+            name: "mapped",
+            type: ParameterType.Map,
+            map: { a: 1 },
+            defaultValue: 2,
+            help: () => "",
+        });
     });
 
     it("Errors on duplicate declarations", () => {
-        logger.resetErrors();
-        options.addDeclaration({
-            name: "help",
-            help: "",
-            type: ParameterType.Boolean,
-        });
-        equal(logger.hasErrors(), true);
+        let threw = false;
+        try {
+            options.addDeclaration({
+                name: "help",
+                help: () => "",
+                type: ParameterType.Boolean,
+            });
+        } catch {
+            threw = true;
+        }
+
+        equal(threw, true);
     });
 
     it("Does not throw if number declaration has no min and max values", () => {
         const declaration: NumberDeclarationOption = {
             name: "test-number-declaration",
-            help: "",
+            help: () => "",
             type: ParameterType.Number,
             defaultValue: 1,
         };
         options.addDeclaration(declaration);
-        options.removeDeclarationByName(declaration.name);
     });
 
     it("Does not throw if default value is out of range for number declaration", () => {
         const declaration: NumberDeclarationOption = {
             name: "test-number-declaration",
-            help: "",
+            help: () => "",
             type: ParameterType.Number,
             minValue: 1,
             maxValue: 10,
             defaultValue: 0,
         };
         options.addDeclaration(declaration);
-        options.removeDeclarationByName(declaration.name);
     });
 
     it("Does not throw if a map declaration has a default value that is not part of the map of possible values", () => {
         const declaration: MapDeclarationOption<number> = {
             name: "testMapDeclarationWithForeignDefaultValue",
-            help: "",
+            help: () => "",
             type: ParameterType.Map,
             map: new Map([
                 ["a", 1],
@@ -71,18 +77,6 @@ describe("Options", () => {
             defaultValue: 0,
         };
         options.addDeclaration(declaration);
-        options.removeDeclarationByName(declaration.name);
-    });
-
-    it("Supports removing a declaration by name", () => {
-        options.addDeclaration({ name: "not-an-option", help: "" });
-        options.removeDeclarationByName("not-an-option");
-        equal(options.getDeclaration("not-an-option"), undefined);
-    });
-
-    it("Ignores removal of non-existent declarations", () => {
-        options.removeDeclarationByName("not-an-option");
-        equal(options.getDeclaration("not-an-option"), undefined);
     });
 
     it("Throws on attempt to get an undeclared option", () => {
@@ -101,13 +95,13 @@ describe("Options", () => {
         throws(() => options.setValue("validation", "bad" as never));
         throws(() => options.setValue("validation", void 0 as never));
         throws(() =>
-            options.setValue("validation", { notExported: "bad" } as never)
+            options.setValue("validation", { notExported: "bad" } as never),
         );
     });
 
     it("Errors if setting a flag which does not exist", () => {
         throws(() =>
-            options.setValue("validation", { doesNotExist: true } as never)
+            options.setValue("validation", { doesNotExist: true } as never),
         );
     });
 
@@ -117,6 +111,8 @@ describe("Options", () => {
             notExported: true,
             notDocumented: true,
             invalidLink: true,
+            rewrittenLink: true,
+            unusedMergeModuleWith: true,
         });
 
         options.setValue("validation", false);
@@ -124,12 +120,13 @@ describe("Options", () => {
             notExported: false,
             notDocumented: false,
             invalidLink: false,
+            rewrittenLink: false,
+            unusedMergeModuleWith: false,
         });
     });
 
     it("Resets a flag to the default if set to null", () => {
-        const options = new Options(new Logger());
-        options.addDefaultDeclarations();
+        const options = new Options(new Internationalization(null).proxy);
 
         options.setValue("validation", { notExported: true });
         options.setValue("validation", { notExported: null! });
@@ -141,8 +138,7 @@ describe("Options", () => {
     });
 
     it("Handles mapped enums properly", () => {
-        const options = new Options(new Logger());
-        options.addDefaultDeclarations();
+        const options = new Options(new Internationalization(null).proxy);
 
         equal(options.getValue("logLevel"), LogLevel.Info);
         options.setValue("logLevel", LogLevel.Error);
@@ -156,8 +152,7 @@ describe("Options", () => {
     });
 
     it("Supports checking if an option is set", () => {
-        const options = new Options(new Logger());
-        options.addDefaultDeclarations();
+        const options = new Options(new Internationalization(null).proxy);
         equal(options.isSet("excludePrivate"), false);
         options.setValue("excludePrivate", false);
         equal(options.isSet("excludePrivate"), true);
@@ -167,86 +162,59 @@ describe("Options", () => {
         throws(() => options.isSet("does not exist" as never));
     });
 
-    it("Throws if frozen and a value is set", () => {
-        const options = new Options(new Logger());
-        options.addDefaultDeclarations();
-        options.freeze();
-
-        throws(() => options.setValue("emit", true));
-        throws(() => options.setCompilerOptions([], {}, []));
-    });
-
     it("Supports resetting values", () => {
-        const options = new Options(new Logger());
-        options.addDefaultDeclarations();
+        const options = new Options(new Internationalization(null).proxy);
 
         options.setValue("entryPoints", ["x"]);
-        options.setValue("excludeTags", ["x"]);
+        const oldExcludeTags = options.getValue("excludeTags");
+        options.setValue("excludeTags", ["@x"]);
         options.reset();
 
         equal(options.getValue("entryPoints"), []);
-        equal(options.getValue("excludeTags"), []);
+        equal(options.getValue("excludeTags"), oldExcludeTags);
     });
 
     it("Supports resetting a single value", () => {
-        const options = new Options(new Logger());
-        options.addDefaultDeclarations();
+        const options = new Options(new Internationalization(null).proxy);
 
         options.setValue("name", "test");
-        options.setValue("excludeTags", ["x"]);
+        const originalExclude = options.getValue("excludeTags");
+        options.setValue("excludeTags", ["@x"]);
         options.reset("excludeTags");
 
         equal(options.getValue("name"), "test");
-        equal(options.getValue("excludeTags"), []);
+        equal(options.getValue("excludeTags"), originalExclude);
     });
 
     it("Throws if resetting a single value which does not exist", () => {
-        const options = new Options(new Logger());
-        options.addDefaultDeclarations();
+        const options = new Options(new Internationalization(null).proxy);
 
         throws(() => options.reset("thisOptionDoesNotExist" as never));
     });
 });
 
-describe("BindOption", () => {
+describe("Option", () => {
     class Container {
         constructor(public options: Options) {}
 
-        @BindOption("emit")
-        emit!: EmitStrategy;
+        @Option("emit")
+        accessor emit!: EmitStrategy;
     }
 
     it("Supports fetching options", () => {
-        const options = new Options(new Logger());
-        options.addDefaultDeclarations();
+        const options = new Options(new Internationalization(null).proxy);
 
         const container = new Container(options);
         equal(container.emit, "docs");
     });
 
     it("Updates as option values change", () => {
-        const options = new Options(new Logger());
-        options.addDefaultDeclarations();
+        const options = new Options(new Internationalization(null).proxy);
 
         const container = new Container(options);
         equal(container.emit, "docs");
 
         options.setValue("emit", "both");
         equal(container.emit, "both");
-    });
-
-    it("Caches set options when frozen", () => {
-        const options = new Options(new Logger());
-        options.addDefaultDeclarations();
-
-        const container = new Container(options);
-
-        options.setValue("emit", "both");
-        options.freeze();
-        equal(container.emit, "both");
-
-        const prop = Object.getOwnPropertyDescriptor(container, "emit")!;
-        equal(prop.get, void 0);
-        equal(prop.value, "both");
     });
 });

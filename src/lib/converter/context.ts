@@ -1,19 +1,29 @@
 import { ok as assert } from "assert";
-import * as ts from "typescript";
+import ts from "typescript";
 
 import {
-    Reflection,
-    ProjectReflection,
+    type Reflection,
+    type ProjectReflection,
     ContainerReflection,
     DeclarationReflection,
+    type DocumentReflection,
     ReflectionKind,
     ReflectionFlag,
-} from "../models/index";
+} from "../models/index.js";
 
-import type { Converter } from "./converter";
-import { isNamedNode } from "./utils/nodes";
-import { ConverterEvents } from "./converter-events";
-import { resolveAliasedSymbol } from "./utils/symbols";
+import type { Converter } from "./converter.js";
+import { isNamedNode } from "./utils/nodes.js";
+import { ConverterEvents } from "./converter-events.js";
+import { resolveAliasedSymbol } from "./utils/symbols.js";
+import {
+    getComment,
+    getFileComment,
+    getJsDocComment,
+    getNodeComment,
+    getSignatureComment,
+} from "./comments/index.js";
+import { getHumanName } from "../utils/tsutils.js";
+import type { TranslationProxy } from "../internationalization/internationalization.js";
 
 /**
  * The context describes the current state the converter is in.
@@ -32,13 +42,20 @@ export class Context {
     }
 
     /**
+     * Translation interface for log messages.
+     */
+    get i18n(): TranslationProxy {
+        return this.converter.application.i18n;
+    }
+
+    /**
      * The program currently being converted.
      * Accessing this property will throw if a source file is not currently being converted.
      */
     get program(): ts.Program {
         assert(
             this._program,
-            "Tried to access Context.program when not converting a source file"
+            "Tried to access Context.program when not converting a source file",
         );
         return this._program;
     }
@@ -59,33 +76,9 @@ export class Context {
      */
     readonly scope: Reflection;
 
-    /** @internal */
-    isConvertingTypeNode(): boolean {
-        return this.convertingTypeNode;
-    }
-
-    /** @internal */
-    setConvertingTypeNode() {
-        this.convertingTypeNode = true;
-    }
-
-    /**
-     * This is a horrible hack to avoid breaking backwards compatibility for plugins
-     * that use EVENT_CREATE_DECLARATION. The comment plugin needs to be able to check
-     * this to properly get the comment for module re-exports:
-     * ```ts
-     * /** We should use this comment *&#47;
-     * export * as Mod from "./mod"
-     * ```
-     * Will be removed in 0.23.
-     * @internal
-     */
-    exportSymbol?: ts.Symbol;
-
-    /** @internal */
-    shouldBeStatic = false;
-
-    private convertingTypeNode = false;
+    convertingTypeNode = false; // Inherited by withScope
+    convertingClassOrInterface = false; // Not inherited
+    shouldBeStatic = false; // Not inherited
 
     /**
      * Create a new Context instance.
@@ -97,7 +90,7 @@ export class Context {
         converter: Converter,
         programs: readonly ts.Program[],
         project: ProjectReflection,
-        scope: Context["scope"] = project
+        scope: Context["scope"] = project,
     ) {
         this.converter = converter;
         this.programs = programs;
@@ -109,13 +102,6 @@ export class Context {
     /** @internal */
     get logger() {
         return this.converter.application.logger;
-    }
-
-    /**
-     * Return the compiler options.
-     */
-    getCompilerOptions(): ts.CompilerOptions {
-        return this.converter.application.options.getCompilerOptions();
     }
 
     /**
@@ -134,17 +120,15 @@ export class Context {
         if (!nodeType) {
             if (node.symbol) {
                 nodeType = this.checker.getDeclaredTypeOfSymbol(node.symbol);
-            } else if (node.parent && node.parent.symbol) {
+                // The TS types lie due to ts.SourceFile
+            } else if (node.parent?.symbol) {
                 nodeType = this.checker.getDeclaredTypeOfSymbol(
-                    node.parent.symbol
+                    node.parent.symbol,
                 );
-            } else if (
-                node.parent &&
-                node.parent.parent &&
-                node.parent.parent.symbol
-            ) {
+                // The TS types lie due to ts.SourceFile
+            } else if (node.parent?.parent?.symbol) {
                 nodeType = this.checker.getDeclaredTypeOfSymbol(
-                    node.parent.parent.symbol
+                    node.parent.parent.symbol,
                 );
             }
         }
@@ -164,12 +148,12 @@ export class Context {
         if (!symbol) {
             const { line } = ts.getLineAndCharacterOfPosition(
                 node.getSourceFile(),
-                node.pos
+                node.pos,
             );
             throw new Error(
                 `Expected a symbol for node with kind ${
                     ts.SyntaxKind[node.kind]
-                } at ${node.getSourceFile().fileName}:${line + 1}`
+                } at ${node.getSourceFile().fileName}:${line + 1}`,
             );
         }
         return symbol;
@@ -184,56 +168,87 @@ export class Context {
         symbol: ts.Symbol | undefined,
         exportSymbol: ts.Symbol | undefined,
         // We need this because modules don't always have symbols.
-        nameOverride?: string
+        nameOverride?: string,
     ) {
         const name = getHumanName(
-            nameOverride ?? exportSymbol?.name ?? symbol?.name ?? "unknown"
+            nameOverride ?? exportSymbol?.name ?? symbol?.name ?? "unknown",
         );
+
+        if (this.convertingClassOrInterface) {
+            if (kind === ReflectionKind.Function) {
+                kind = ReflectionKind.Method;
+            }
+            if (kind === ReflectionKind.Variable) {
+                kind = ReflectionKind.Property;
+            }
+        }
+
         const reflection = new DeclarationReflection(name, kind, this.scope);
+        this.postReflectionCreation(reflection, symbol, exportSymbol);
+
+        return reflection;
+    }
+
+    postReflectionCreation(
+        reflection: Reflection,
+        symbol: ts.Symbol | undefined,
+        exportSymbol: ts.Symbol | undefined,
+    ) {
+        if (
+            exportSymbol &&
+            reflection.kind &
+                (ReflectionKind.SomeModule | ReflectionKind.Reference)
+        ) {
+            reflection.comment = this.getComment(exportSymbol, reflection.kind);
+        }
+        if (symbol && !reflection.comment) {
+            reflection.comment = this.getComment(symbol, reflection.kind);
+        }
+
         if (this.shouldBeStatic) {
             reflection.setFlag(ReflectionFlag.Static);
         }
-        reflection.escapedName = symbol?.escapedName;
 
-        this.addChild(reflection);
+        if (reflection instanceof DeclarationReflection) {
+            reflection.escapedName = symbol?.escapedName;
+            this.addChild(reflection);
+        }
+
         if (symbol && this.converter.isExternal(symbol)) {
             reflection.setFlag(ReflectionFlag.External);
         }
         if (exportSymbol) {
             this.registerReflection(reflection, exportSymbol);
         }
-        this.registerReflection(reflection, symbol);
 
-        return reflection;
+        const path = reflection.kindOf(
+            ReflectionKind.Namespace | ReflectionKind.Module,
+        )
+            ? symbol?.declarations?.find(ts.isSourceFile)?.fileName
+            : undefined;
+        this.project.registerReflection(reflection, symbol, path);
     }
 
-    finalizeDeclarationReflection(
-        reflection: DeclarationReflection,
-        symbol: ts.Symbol | undefined,
-        exportSymbol?: ts.Symbol,
-        commentNode?: ts.Node
-    ) {
-        this.exportSymbol = exportSymbol;
+    finalizeDeclarationReflection(reflection: DeclarationReflection) {
         this.converter.trigger(
             ConverterEvents.CREATE_DECLARATION,
             this,
             reflection,
-            (symbol &&
-                this.converter.getNodesForSymbol(symbol, reflection.kind)[0]) ??
-                commentNode
         );
-        this.exportSymbol = undefined;
+
+        if (reflection.kindOf(ReflectionKind.MayContainDocuments)) {
+            this.converter.processDocumentTags(reflection, reflection);
+        }
     }
 
-    addChild(reflection: DeclarationReflection) {
+    addChild(reflection: DeclarationReflection | DocumentReflection) {
         if (this.scope instanceof ContainerReflection) {
-            this.scope.children ??= [];
-            this.scope.children.push(reflection);
+            this.scope.addChild(reflection);
         }
     }
 
     shouldIgnore(symbol: ts.Symbol) {
-        return this.converter.shouldIgnore(symbol, this.checker);
+        return this.converter.shouldIgnore(symbol);
     }
 
     /**
@@ -244,20 +259,7 @@ export class Context {
      * @param symbol  The symbol the given reflection was resolved from.
      */
     registerReflection(reflection: Reflection, symbol: ts.Symbol | undefined) {
-        this.project.registerReflection(reflection, symbol);
-    }
-
-    /**
-     * Trigger a node reflection event.
-     *
-     * All events are dispatched on the current converter instance.
-     *
-     * @param name  The name of the event that should be triggered.
-     * @param reflection  The triggering reflection.
-     * @param node  The triggering TypeScript node if available.
-     */
-    trigger(name: string, reflection: Reflection, node?: ts.Node) {
-        this.converter.trigger(name, this, reflection, node);
+        this.project.registerReflection(reflection, symbol, void 0);
     }
 
     /** @internal */
@@ -265,36 +267,76 @@ export class Context {
         this._program = program;
     }
 
-    /**
-     * @param callback  The callback function that should be executed with the changed context.
-     */
+    getComment(symbol: ts.Symbol, kind: ReflectionKind) {
+        return getComment(
+            symbol,
+            kind,
+            this.converter.config,
+            this.logger,
+            this.checker,
+            this.project.files,
+        );
+    }
+
+    getNodeComment(node: ts.Node, moduleComment: boolean) {
+        return getNodeComment(
+            node,
+            moduleComment,
+            this.converter.config,
+            this.logger,
+            this.checker,
+            this.project.files,
+        );
+    }
+
+    getFileComment(node: ts.SourceFile) {
+        return getFileComment(
+            node,
+            this.converter.config,
+            this.logger,
+            this.checker,
+            this.project.files,
+        );
+    }
+
+    getJsDocComment(
+        declaration:
+            | ts.JSDocPropertyLikeTag
+            | ts.JSDocCallbackTag
+            | ts.JSDocTypedefTag
+            | ts.JSDocTemplateTag
+            | ts.JSDocEnumTag,
+    ) {
+        return getJsDocComment(
+            declaration,
+            this.converter.config,
+            this.logger,
+            this.checker,
+            this.project.files,
+        );
+    }
+
+    getSignatureComment(
+        declaration: ts.SignatureDeclaration | ts.JSDocSignature,
+    ) {
+        return getSignatureComment(
+            declaration,
+            this.converter.config,
+            this.logger,
+            this.checker,
+            this.project.files,
+        );
+    }
+
     public withScope(scope: Reflection): Context {
         const context = new Context(
             this.converter,
             this.programs,
             this.project,
-            scope
+            scope,
         );
         context.convertingTypeNode = this.convertingTypeNode;
         context.setActiveProgram(this._program);
         return context;
     }
-}
-
-const builtInSymbolRegExp = /^__@(\w+)$/;
-const uniqueSymbolRegExp = /^__@(.*)@\d+$/;
-
-function getHumanName(name: string) {
-    // TS 4.0, 4.1, 4.2 - well known symbols are treated specially.
-    let match = builtInSymbolRegExp.exec(name);
-    if (match) {
-        return `[Symbol.${match[1]}]`;
-    }
-
-    match = uniqueSymbolRegExp.exec(name);
-    if (match) {
-        return `[${match[1]}]`;
-    }
-
-    return name;
 }

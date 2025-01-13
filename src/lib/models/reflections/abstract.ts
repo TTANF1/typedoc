@@ -1,23 +1,23 @@
-import { ok } from "assert";
-import type { SourceReference } from "../sources/file";
-import type { Type } from "../types";
-import type { Comment } from "../comments/comment";
-import { splitUnquotedString } from "./utils";
-import type { ProjectReflection } from "./project";
-import type { NeverIfInternal } from "../../utils";
-import { ReflectionKind } from "./kind";
-
-/**
- * Holds all data models used by TypeDoc.
- *
- * The {@link BaseReflection} is base class of all reflection models. The subclass {@link ProjectReflection}
- * serves as the root container for the current project while {@link DeclarationReflection} instances
- * form the structure of the project. Most of the other classes in this namespace are referenced by this
- * two base classes.
- *
- * The models {@link NavigationItem} and {@link UrlMapping} are special as they are only used by the {@link Renderer}
- * while creating the final output.
- */
+import { Comment } from "../comments/comment.js";
+import { splitUnquotedString } from "./utils.js";
+import type { ProjectReflection } from "./project.js";
+import type { NeverIfInternal } from "../../utils/index.js";
+import { ReflectionKind } from "./kind.js";
+import type {
+    Serializer,
+    Deserializer,
+    JSONOutput,
+} from "../../serialization/index.js";
+import type { ReflectionVariant } from "./variant.js";
+import type { DeclarationReflection } from "./declaration.js";
+import type { DocumentReflection } from "./document.js";
+import { NonEnumerable } from "../../utils/general.js";
+import type {
+    Internationalization,
+    TranslatedString,
+} from "../../internationalization/index.js";
+import type { ParameterReflection } from "./parameter.js";
+import type { ReferenceReflection } from "./reference.js";
 
 /**
  * Current reflection id.
@@ -35,29 +35,24 @@ export function resetReflectionID() {
 
 export enum ReflectionFlag {
     None = 0,
-    Private = 1,
-    Protected = 2,
-    Public = 4,
-    Static = 8,
-    ExportAssignment = 16,
-    External = 32,
-    Optional = 64,
-    DefaultValue = 128,
-    Rest = 256,
-    Abstract = 512,
-    Const = 1024,
-    Let = 2048,
-    Readonly = 4096,
+    Private = 1 << 0,
+    Protected = 1 << 1,
+    Public = 1 << 2,
+    Static = 1 << 3,
+    External = 1 << 4,
+    Optional = 1 << 5,
+    Rest = 1 << 6,
+    Abstract = 1 << 7,
+    Const = 1 << 8,
+    Readonly = 1 << 9,
+    Inherited = 1 << 10,
 }
 
 const relevantFlags: ReflectionFlag[] = [
     ReflectionFlag.Private,
     ReflectionFlag.Protected,
     ReflectionFlag.Static,
-    ReflectionFlag.ExportAssignment,
     ReflectionFlag.Optional,
-    ReflectionFlag.DefaultValue,
-    ReflectionFlag.Rest,
     ReflectionFlag.Abstract,
     ReflectionFlag.Const,
     ReflectionFlag.Readonly,
@@ -66,7 +61,7 @@ const relevantFlags: ReflectionFlag[] = [
 /**
  * This must extend Array in order to work with Handlebar's each helper.
  */
-export class ReflectionFlags extends Array<string> {
+export class ReflectionFlags {
     private flags = ReflectionFlag.None;
 
     hasFlag(flag: ReflectionFlag) {
@@ -124,10 +119,6 @@ export class ReflectionFlags extends Array<string> {
         return this.hasFlag(ReflectionFlag.Rest);
     }
 
-    get hasExportAssignment(): boolean {
-        return this.hasFlag(ReflectionFlag.ExportAssignment);
-    }
-
     get isAbstract(): boolean {
         return this.hasFlag(ReflectionFlag.Abstract);
     }
@@ -138,6 +129,10 @@ export class ReflectionFlags extends Array<string> {
 
     get isReadonly() {
         return this.hasFlag(ReflectionFlag.Readonly);
+    }
+
+    get isInherited() {
+        return this.hasFlag(ReflectionFlag.Inherited);
     }
 
     setFlag(flag: ReflectionFlag, set: boolean) {
@@ -168,27 +163,62 @@ export class ReflectionFlags extends Array<string> {
         }
     }
 
-    private setSingleFlag(flag: ReflectionFlag, set: boolean) {
-        const name = ReflectionFlag[flag].replace(
-            /(.)([A-Z])/g,
-            (_m, a, b) => a + " " + b.toLowerCase()
-        );
-        if (!set && this.hasFlag(flag)) {
-            if (relevantFlags.includes(flag)) {
-                this.splice(this.indexOf(name), 1);
+    getFlagStrings(i18n: Internationalization) {
+        const strings: TranslatedString[] = [];
+        for (const flag of relevantFlags) {
+            if (this.hasFlag(flag)) {
+                strings.push(i18n.flagString(flag));
             }
+        }
+        return strings;
+    }
+
+    private setSingleFlag(flag: ReflectionFlag, set: boolean) {
+        if (!set && this.hasFlag(flag)) {
             this.flags ^= flag;
         } else if (set && !this.hasFlag(flag)) {
-            if (relevantFlags.includes(flag)) {
-                this.push(name);
-            }
             this.flags |= flag;
+        }
+    }
+
+    private static serializedFlags = [
+        "isPrivate",
+        "isProtected",
+        "isPublic",
+        "isStatic",
+        "isExternal",
+        "isOptional",
+        "isRest",
+        "isAbstract",
+        "isConst",
+        "isReadonly",
+        "isInherited",
+    ] as const;
+
+    toObject(): JSONOutput.ReflectionFlags {
+        return Object.fromEntries(
+            ReflectionFlags.serializedFlags
+                .filter((flag) => this[flag])
+                .map((flag) => [flag, true]),
+        );
+    }
+
+    fromObject(obj: JSONOutput.ReflectionFlags) {
+        for (const key of Object.keys(obj)) {
+            const flagName = key.substring(2); // isPublic => Public
+            if (flagName in ReflectionFlag) {
+                this.setFlag(
+                    ReflectionFlag[flagName as keyof typeof ReflectionFlag],
+                    true,
+                );
+            }
         }
     }
 }
 
 export enum TraverseProperty {
     Children,
+    Documents,
     Parameters,
     TypeLiteral,
     TypeParameter,
@@ -203,31 +233,17 @@ export interface TraverseCallback {
      * May return false to bail out of any further iteration. To preserve backwards compatibility, if
      * a function returns undefined, iteration must continue.
      */
-    (reflection: Reflection, property: TraverseProperty):
-        | boolean
-        | NeverIfInternal<void>;
+    (
+        reflection: Reflection,
+        property: TraverseProperty,
+    ): boolean | NeverIfInternal<void>;
 }
 
-/**
- * Defines the usage of a decorator.
- */
-export interface Decorator {
-    /**
-     * The name of the decorator being applied.
-     */
-    name: string;
+export type ReflectionVisitor = {
+    [K in keyof ReflectionVariant]?: (refl: ReflectionVariant[K]) => void;
+};
 
-    /**
-     * The type declaring the decorator.
-     * Usually a ReferenceType instance pointing to the decorator function.
-     */
-    type?: Type;
-
-    /**
-     * A named map of arguments the decorator is applied with.
-     */
-    arguments?: any;
-}
+export type ReflectionId = number & { __reflectionIdBrand: never };
 
 /**
  * Base class for all reflection classes.
@@ -237,14 +253,20 @@ export interface Decorator {
  * by the {@link DeclarationReflection} class.
  *
  * This base class exposes the basic properties one may use to traverse the reflection tree.
- * You can use the {@link ContainerReflection.children} and {@link parent} properties to walk the tree. The {@link groups} property
- * contains a list of all children grouped and sorted for being rendered.
+ * You can use the {@link ContainerReflection.children} and {@link parent} properties to walk the tree. The {@link ContainerReflection.groups} property
+ * contains a list of all children grouped and sorted for rendering.
+ * @category Reflections
  */
 export abstract class Reflection {
     /**
+     * Discriminator representing the type of reflection represented by this object.
+     */
+    abstract readonly variant: keyof ReflectionVariant;
+
+    /**
      * Unique id of this reflection.
      */
-    id: number;
+    id: ReflectionId;
 
     /**
      * The symbol name of this reflection.
@@ -252,56 +274,25 @@ export abstract class Reflection {
     name: string;
 
     /**
-     * The original name of the TypeScript declaration.
-     */
-    originalName: string;
-
-    /**
      * The kind of this reflection.
      */
     kind: ReflectionKind;
-
-    /**
-     * The human readable string representation of the kind of this reflection.
-     * Set during the resolution phase by GroupPlugin
-     */
-    kindString?: string;
 
     flags: ReflectionFlags = new ReflectionFlags();
 
     /**
      * The reflection this reflection is a child of.
      */
+    @NonEnumerable // So that it doesn't show up in console.log
     parent?: Reflection;
 
-    get project(): ProjectReflection {
-        if (this.isProject()) return this;
-        ok(
-            this.parent,
-            "Tried to get the project on a reflection not in a project"
-        );
-        return this.parent.project;
-    }
+    @NonEnumerable
+    project: ProjectReflection;
 
     /**
      * The parsed documentation comment attached to this reflection.
      */
     comment?: Comment;
-
-    /**
-     * A list of all source files that contributed to this reflection.
-     */
-    sources?: SourceReference[];
-
-    /**
-     * A list of all decorators attached to this reflection.
-     */
-    decorators?: Decorator[];
-
-    /**
-     * A list of all types that are decorated by this reflection.
-     */
-    decorates?: Type[];
 
     /**
      * The url of this reflection in the generated documentation.
@@ -323,30 +314,11 @@ export abstract class Reflection {
      */
     hasOwnDocument?: boolean;
 
-    /**
-     * A list of generated css classes that should be applied to representations of this
-     * reflection in the generated markup.
-     * TODO: Reflections shouldn't know about CSS. Move this property to the correct serializer.
-     */
-    cssClasses?: string;
-
-    /**
-     * Url safe alias for this reflection.
-     *
-     * @see {@link BaseReflection.getAlias}
-     */
-    private _alias?: string;
-
-    private _aliases?: Map<string, number>;
-
-    /**
-     * Create a new BaseReflection instance.
-     */
     constructor(name: string, kind: ReflectionKind, parent?: Reflection) {
-        this.id = REFLECTION_ID++;
+        this.id = REFLECTION_ID++ as ReflectionId;
         this.parent = parent;
+        this.project = parent?.project || (this as any as ProjectReflection);
         this.name = name;
-        this.originalName = name;
         this.kind = kind;
 
         // If our parent is external, we are too.
@@ -359,12 +331,15 @@ export abstract class Reflection {
      * Test whether this reflection is of the given kind.
      */
     kindOf(kind: ReflectionKind | ReflectionKind[]): boolean {
-        const kindArray = Array.isArray(kind) ? kind : [kind];
-        return kindArray.some((kind) => (this.kind & kind) !== 0);
+        const kindFlags = Array.isArray(kind)
+            ? kind.reduce((a, b) => a | b, 0)
+            : kind;
+        return (this.kind & kindFlags) !== 0;
     }
 
     /**
-     * Return the full name of this reflection.
+     * Return the full name of this reflection. Intended for use in debugging. For log messages
+     * intended to be displayed to the user for them to fix, prefer {@link getFriendlyFullName} instead.
      *
      * The full name contains the name of this reflection and the names of all parent reflections.
      *
@@ -380,49 +355,33 @@ export abstract class Reflection {
     }
 
     /**
+     * Return the full name of this reflection, with signature names dropped if possible without
+     * introducing ambiguity in the name.
+     */
+    getFriendlyFullName(): string {
+        if (this.parent && !this.parent.isProject()) {
+            if (
+                this.kindOf(
+                    ReflectionKind.ConstructorSignature |
+                        ReflectionKind.CallSignature |
+                        ReflectionKind.GetSignature |
+                        ReflectionKind.SetSignature,
+                )
+            ) {
+                return this.parent.getFriendlyFullName();
+            }
+
+            return this.parent.getFriendlyFullName() + "." + this.name;
+        } else {
+            return this.name;
+        }
+    }
+
+    /**
      * Set a flag on this reflection.
      */
     setFlag(flag: ReflectionFlag, value = true) {
         this.flags.setFlag(flag, value);
-    }
-
-    /**
-     * Return an url safe alias for this reflection.
-     */
-    getAlias(): string {
-        if (!this._alias) {
-            let alias = this.name.replace(/[^a-z0-9]/gi, "_");
-            if (alias === "") {
-                alias = "reflection-" + this.id;
-            }
-
-            let target = <Reflection>this;
-            while (
-                target.parent &&
-                !target.parent.isProject() &&
-                !target.hasOwnDocument
-            ) {
-                target = target.parent;
-            }
-
-            if (!target._aliases) {
-                target._aliases = new Map();
-            }
-
-            let suffix = "";
-            if (!target._aliases.has(alias)) {
-                target._aliases.set(alias, 1);
-            } else {
-                const count = target._aliases.get(alias)!;
-                suffix = "-" + count.toString();
-                target._aliases.set(alias, count + 1);
-            }
-
-            alias += suffix;
-            this._alias = alias;
-        }
-
-        return this._alias;
     }
 
     /**
@@ -441,7 +400,7 @@ export abstract class Reflection {
     /**
      * Return a child by its name.
      *
-     * @param names The name hierarchy of the child to look for.
+     * @param arg The name hierarchy of the child to look for.
      * @returns The found child or undefined.
      */
     getChildByName(arg: string | string[]): Reflection | undefined {
@@ -472,35 +431,59 @@ export abstract class Reflection {
     isProject(): this is ProjectReflection {
         return false;
     }
-
-    /**
-     * Try to find a reflection by its name.
-     *
-     * @return The found reflection or null.
-     */
-    findReflectionByName(arg: string | string[]): Reflection | undefined {
-        const names: string[] = Array.isArray(arg)
-            ? arg
-            : splitUnquotedString(arg, ".");
-
-        const reflection = this.getChildByName(names);
-        if (reflection) {
-            return reflection;
-        } else if (this.parent) {
-            return this.parent.findReflectionByName(names);
-        }
+    isDeclaration(): this is DeclarationReflection {
+        return false;
+    }
+    isParameter(): this is ParameterReflection {
+        return false;
+    }
+    isDocument(): this is DocumentReflection {
+        return false;
+    }
+    isReference(): this is ReferenceReflection {
+        return this.variant === "reference";
     }
 
     /**
-     * Traverse all potential child reflections of this reflection.
+     * Check if this reflection or any of its parents have been marked with the `@deprecated` tag.
+     */
+    isDeprecated(): boolean {
+        let signaturesDeprecated = false as boolean;
+        this.visit({
+            declaration(decl) {
+                if (
+                    decl.signatures?.length &&
+                    decl.signatures.every((sig) =>
+                        sig.comment?.getTag("@deprecated"),
+                    )
+                ) {
+                    signaturesDeprecated = true;
+                }
+            },
+        });
+
+        if (signaturesDeprecated || this.comment?.getTag("@deprecated")) {
+            return true;
+        }
+
+        return this.parent?.isDeprecated() ?? false;
+    }
+
+    /**
+     * Traverse most potential child reflections of this reflection.
+     *
+     * Note: This may not necessarily traverse child reflections contained within the `type` property
+     * of the reflection, and should not be relied on for this. Support for checking object types will likely be removed in v0.27.
      *
      * The given callback will be invoked for all children, signatures and type parameters
      * attached to this reflection.
      *
      * @param callback  The callback function that should be applied for each child reflection.
      */
-    traverse(_callback: TraverseCallback) {
-        // do nothing here, overridden by child classes
+    abstract traverse(callback: TraverseCallback): void;
+
+    visit(visitor: ReflectionVisitor) {
+        visitor[this.variant]?.(this as never);
     }
 
     /**
@@ -512,6 +495,8 @@ export abstract class Reflection {
 
     /**
      * Return a string representation of this reflection and all of its children.
+     *
+     * Note: This is intended as a debug tool only, output may change between patch versions.
      *
      * @param indent  Used internally to indent child reflections.
      */
@@ -525,5 +510,33 @@ export abstract class Reflection {
         });
 
         return lines.join("\n");
+    }
+
+    toObject(serializer: Serializer): JSONOutput.Reflection {
+        return {
+            id: this.id,
+            name: this.name,
+            variant: this.variant,
+            kind: this.kind,
+            flags: this.flags.toObject(),
+            comment:
+                this.comment && !this.comment.isEmpty()
+                    ? serializer.toObject(this.comment)
+                    : undefined,
+        };
+    }
+
+    fromObject(de: Deserializer, obj: JSONOutput.Reflection) {
+        // DO NOT copy id from obj. When deserializing reflections
+        // they should be given new ids since they belong to a different project.
+        this.name = obj.name;
+        // Skip copying variant, we know it's already the correct value because the deserializer
+        // will construct the correct class type.
+        this.kind = obj.kind;
+        this.flags.fromObject(obj.flags);
+        // Parent is set during construction, so we don't need to do it here.
+        this.comment = de.revive(obj.comment, () => new Comment());
+        // url, anchor, hasOwnDocument, _alias, _aliases are set during rendering and only relevant during render.
+        // It doesn't make sense to serialize them to json, or restore them.
     }
 }

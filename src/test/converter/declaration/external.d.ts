@@ -1,3 +1,3 @@
-import * as ts from "typescript";
+import ts = require("typescript");
 
 export const ActionSet: ts.server.ActionSet;

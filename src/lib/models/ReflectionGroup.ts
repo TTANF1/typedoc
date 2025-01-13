@@ -1,6 +1,16 @@
-import type { ReflectionKind } from "./reflections/kind";
-import type { ReflectionCategory } from "./ReflectionCategory";
-import type { DeclarationReflection } from ".";
+import { ReflectionCategory } from "./ReflectionCategory.js";
+import { Comment } from "./comments/index.js";
+import type {
+    CommentDisplayPart,
+    DeclarationReflection,
+    DocumentReflection,
+    Reflection,
+} from "./index.js";
+import type {
+    Serializer,
+    JSONOutput,
+    Deserializer,
+} from "../serialization/index.js";
 
 /**
  * A group of reflections. All reflections in a group are of the same kind.
@@ -16,40 +26,14 @@ export class ReflectionGroup {
     title: string;
 
     /**
-     * The original typescript kind of the children of this group.
+     * User specified description via `@groupDescription`, if specified.
      */
-    kind: ReflectionKind;
+    description?: CommentDisplayPart[];
 
     /**
      * All reflections of this group.
      */
-    children: DeclarationReflection[] = [];
-
-    /**
-     * A list of generated css classes that should be applied to representations of this
-     * group in the generated markup.
-     */
-    cssClasses?: string;
-
-    /**
-     * Are all children inherited members?
-     */
-    allChildrenAreInherited?: boolean;
-
-    /**
-     * Are all children private members?
-     */
-    allChildrenArePrivate?: boolean;
-
-    /**
-     * Are all children private or protected members?
-     */
-    allChildrenAreProtectedOrPrivate?: boolean;
-
-    /**
-     * Are all children external members?
-     */
-    allChildrenAreExternal?: boolean;
+    children: Array<DeclarationReflection | DocumentReflection> = [];
 
     /**
      * Categories contained within this group.
@@ -60,11 +44,13 @@ export class ReflectionGroup {
      * Create a new ReflectionGroup instance.
      *
      * @param title The title of this group.
-     * @param kind  The original typescript kind of the children of this group.
+     * @param owningReflection The reflection containing this group, useful for changing rendering based on a comment on a reflection.
      */
-    constructor(title: string, kind: ReflectionKind) {
+    constructor(
+        title: string,
+        readonly owningReflection: Reflection,
+    ) {
         this.title = title;
-        this.kind = kind;
     }
 
     /**
@@ -72,5 +58,49 @@ export class ReflectionGroup {
      */
     allChildrenHaveOwnDocument(): boolean {
         return this.children.every((child) => child.hasOwnDocument);
+    }
+
+    toObject(serializer: Serializer): JSONOutput.ReflectionGroup {
+        return {
+            title: this.title,
+            description: this.description
+                ? Comment.serializeDisplayParts(serializer, this.description)
+                : undefined,
+            children:
+                this.children.length > 0
+                    ? this.children.map((child) => child.id)
+                    : undefined,
+            categories: serializer.toObjectsOptional(this.categories),
+        };
+    }
+
+    fromObject(de: Deserializer, obj: JSONOutput.ReflectionGroup) {
+        if (obj.description) {
+            this.description = Comment.deserializeDisplayParts(
+                de,
+                obj.description,
+            );
+        }
+
+        if (obj.categories) {
+            this.categories = obj.categories.map((catObj) => {
+                const cat = new ReflectionCategory(catObj.title);
+                de.fromObject(cat, catObj);
+                return cat;
+            });
+        }
+
+        if (obj.children) {
+            de.defer((project) => {
+                for (const childId of obj.children || []) {
+                    const child = project.getReflectionById(
+                        de.oldIdToNewId[childId] ?? -1,
+                    );
+                    if (child?.isDeclaration() || child?.isDocument()) {
+                        this.children.push(child);
+                    }
+                }
+            });
+        }
     }
 }

@@ -1,24 +1,37 @@
 import * as Path from "path";
-import * as FS from "fs";
 
-import { Component, ConverterComponent } from "../components";
-import { Converter } from "../converter";
-import type { Context } from "../context";
-import { BindOption, readFile } from "../../utils";
-import { getCommonDirectory } from "../../utils/fs";
-import { nicePath } from "../../utils/paths";
+import { ConverterComponent } from "../components.js";
+import type { Context } from "../context.js";
+import { Option, EntryPointStrategy, readFile } from "../../utils/index.js";
+import {
+    deriveRootDir,
+    discoverInParentDir,
+    discoverPackageJson,
+} from "../../utils/fs.js";
+import { nicePath } from "../../utils/paths.js";
+import { MinimalSourceFile } from "../../utils/minimalSourceFile.js";
+import type { ProjectReflection } from "../../models/index.js";
+import { ApplicationEvents } from "../../application-events.js";
+import { join } from "path";
+import { ConverterEvents } from "../converter-events.js";
+import type { Converter } from "../converter.js";
 
 /**
  * A handler that tries to find the package.json and readme.md files of the
  * current project.
  */
-@Component({ name: "package" })
 export class PackagePlugin extends ConverterComponent {
-    @BindOption("readme")
-    readme!: string;
+    @Option("readme")
+    accessor readme!: string;
 
-    @BindOption("includeVersion")
-    includeVersion!: boolean;
+    @Option("entryPointStrategy")
+    accessor entryPointStrategy!: EntryPointStrategy;
+
+    @Option("entryPoints")
+    accessor entryPoints!: string[];
+
+    @Option("includeVersion")
+    accessor includeVersion!: boolean;
 
     /**
      * The file name of the found readme.md file.
@@ -26,85 +39,128 @@ export class PackagePlugin extends ConverterComponent {
     private readmeFile?: string;
 
     /**
-     * The file name of the found package.json file.
+     * Contents of the readme.md file discovered, if any
      */
-    private packageFile?: string;
+    private readmeContents?: string;
 
     /**
-     * Create a new PackageHandler instance.
+     * Contents of package.json for the active project
      */
-    override initialize() {
-        this.listenTo(this.owner, {
-            [Converter.EVENT_BEGIN]: this.onBegin,
-            [Converter.EVENT_RESOLVE_BEGIN]: this.onBeginResolve,
+    private packageJson?: { name: string; version?: string };
+
+    constructor(owner: Converter) {
+        super(owner);
+        this.owner.on(ConverterEvents.BEGIN, this.onBegin.bind(this));
+        this.owner.on(
+            ConverterEvents.RESOLVE_BEGIN,
+            this.onBeginResolve.bind(this),
+        );
+        this.owner.on(ConverterEvents.END, () => {
+            delete this.readmeFile;
+            delete this.readmeContents;
+            delete this.packageJson;
         });
+        this.application.on(ApplicationEvents.REVIVE, this.onRevive.bind(this));
     }
 
-    /**
-     * Triggered when the converter begins converting a project.
-     */
-    private onBegin(_context: Context) {
+    private onRevive(project: ProjectReflection) {
+        this.onBegin();
+        this.addEntries(project);
+        delete this.readmeFile;
+        delete this.packageJson;
+        delete this.readmeContents;
+    }
+
+    private onBegin() {
         this.readmeFile = undefined;
-        this.packageFile = undefined;
+        this.readmeContents = undefined;
+        this.packageJson = undefined;
+
+        const entryFiles =
+            this.entryPointStrategy === EntryPointStrategy.Packages
+                ? this.entryPoints.map((d) => join(d, "package.json"))
+                : this.entryPoints;
+
+        const dirName =
+            this.application.options.packageDir ??
+            Path.resolve(deriveRootDir(entryFiles));
+
+        this.application.logger.verbose(
+            `Begin readme.md/package.json search at ${nicePath(dirName)}`,
+        );
+
+        this.packageJson = discoverPackageJson(dirName)?.content;
 
         // Path will be resolved already. This is kind of ugly, but...
-        const noReadmeFile = this.readme.endsWith("none");
-        if (!noReadmeFile && this.readme) {
-            if (FS.existsSync(this.readme)) {
-                this.readmeFile = this.readme;
-            }
+        if (this.readme.endsWith("none")) {
+            return; // No readme, we're done
         }
 
-        const packageAndReadmeFound = () =>
-            (noReadmeFile || this.readmeFile) && this.packageFile;
-        const reachedTopDirectory = (dirName: string) =>
-            dirName === Path.resolve(Path.join(dirName, ".."));
+        if (this.readme) {
+            // Readme path provided, read only that file.
+            try {
+                this.readmeContents = readFile(this.readme);
+                this.readmeFile = this.readme;
+            } catch {
+                this.application.logger.error(
+                    this.application.i18n.provided_readme_at_0_could_not_be_read(
+                        nicePath(this.readme),
+                    ),
+                );
+            }
+        } else {
+            // No readme provided, automatically find the readme
+            const result = discoverInParentDir(
+                "readme.md",
+                dirName,
+                (content) => content,
+            );
 
-        let dirName = Path.resolve(
-            getCommonDirectory(this.application.options.getValue("entryPoints"))
-        );
-        this.application.logger.verbose(
-            `Begin readme search at ${nicePath(dirName)}`
-        );
-        while (!packageAndReadmeFound() && !reachedTopDirectory(dirName)) {
-            FS.readdirSync(dirName).forEach((file) => {
-                const lowercaseFileName = file.toLowerCase();
-                if (
-                    !noReadmeFile &&
-                    !this.readmeFile &&
-                    lowercaseFileName === "readme.md"
-                ) {
-                    this.readmeFile = Path.join(dirName, file);
-                }
-
-                if (!this.packageFile && lowercaseFileName === "package.json") {
-                    this.packageFile = Path.join(dirName, file);
-                }
-            });
-
-            dirName = Path.resolve(Path.join(dirName, ".."));
+            if (result) {
+                this.readmeFile = result.file;
+                this.readmeContents = result.content;
+            }
         }
     }
 
-    /**
-     * Triggered when the converter begins resolving a project.
-     *
-     * @param context  The context object describing the current state the converter is in.
-     */
     private onBeginResolve(context: Context) {
-        const project = context.project;
-        if (this.readmeFile) {
-            project.readme = readFile(this.readmeFile);
+        this.addEntries(context.project);
+    }
+
+    private addEntries(project: ProjectReflection) {
+        if (this.readmeFile && this.readmeContents) {
+            const { content } = this.application.converter.parseRawComment(
+                new MinimalSourceFile(this.readmeContents, this.readmeFile),
+                project.files,
+            );
+
+            project.readme = content;
+
+            // This isn't ideal, but seems better than figuring out the readme
+            // path over in the include plugin...
+            this.owner.includePlugin.checkIncludeTagsParts(
+                project,
+                Path.dirname(this.readmeFile),
+                content,
+            );
         }
 
-        if (this.packageFile) {
-            project.packageInfo = JSON.parse(readFile(this.packageFile));
+        if (this.packageJson) {
+            project.packageName = this.packageJson.name;
             if (!project.name) {
-                project.name = String(project.packageInfo.name);
+                project.name = project.packageName || "Documentation";
             }
             if (this.includeVersion) {
-                project.name = `${project.name} - v${project.packageInfo.version}`;
+                project.packageVersion = this.packageJson.version?.replace(
+                    /^v/,
+                    "",
+                );
             }
+        } else if (!project.name) {
+            this.application.logger.warn(
+                this.application.i18n.defaulting_project_name(),
+            );
+            project.name = "Documentation";
         }
     }
 }

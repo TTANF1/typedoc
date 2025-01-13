@@ -1,37 +1,91 @@
-export { Application } from "./lib/application";
+/**
+ * @module TypeDoc API
+ *
+ * In addition to the members documented here, TypeDoc exports a `typedoc/debug`
+ * entry point which exports some functions which may be useful during plugin
+ * development or debugging. Exports from that entry point are **not stable**
+ * and may change or be removed at any time.
+ */
+export { Application, type ApplicationEvents } from "./lib/application.js";
 
-export { EventDispatcher, Event } from "./lib/utils/events";
-export { resetReflectionID } from "./lib/models/reflections/abstract";
-export { normalizePath } from "./lib/utils/fs";
-export * from "./lib/models";
-export { Converter, Context } from "./lib/converter";
+export { EventDispatcher } from "./lib/utils/events.js";
+export { resetReflectionID } from "./lib/models/reflections/abstract.js";
+/**
+ * All symbols documented under the Models namespace are also available in the root import.
+ *
+ * @categoryDescription Types
+ * Describes a TypeScript type.
+ *
+ * @categoryDescription Reflections
+ * Describes a documentation entry. The root entry is a {@link ProjectReflection}
+ * and contains {@link DeclarationReflection} instances.
+ *
+ * @summary
+ * TypeDoc converts source code into these object types.
+ */
+export * as Models from "./lib/models/index.js";
+/**
+ * All symbols documented under the Configuration namespace are also available in the root import.
+ * @summary
+ * Controls how TypeDoc reads option files and what options are available.
+ */
+export * as Configuration from "./lib/utils/options/index.js";
+export * from "./lib/models/index.js";
+export {
+    Converter,
+    Context,
+    type CommentParserConfig,
+    type DeclarationReference,
+    type SymbolReference,
+    type ComponentPath,
+    type Meaning,
+    type MeaningKeyword,
+    type ExternalResolveResult,
+    type ExternalSymbolResolver,
+    type ConverterEvents,
+} from "./lib/converter/index.js";
 
 export {
     Renderer,
     DefaultTheme,
     DefaultThemeRenderContext,
+    Slugger,
     UrlMapping,
     Theme,
     PageEvent,
     RendererEvent,
     MarkdownEvent,
-} from "./lib/output";
-export type { RenderTemplate, RendererHooks } from "./lib/output";
+    IndexEvent,
+} from "./lib/output/index.js";
+export type {
+    RenderTemplate,
+    RendererHooks,
+    NavigationElement,
+    RendererEvents,
+    PageHeading,
+} from "./lib/output/index.js";
+
+export { Outputs } from "./lib/output/output.js";
 
 export {
     ArgumentsReader,
-    BindOption,
+    Option,
+    CommentStyle,
     JSX,
     LogLevel,
     Logger,
     Options,
+    OptionDefaults,
+    PackageJsonReader,
     ParameterHint,
     ParameterType,
     TSConfigReader,
     TypeDocReader,
     EntryPointStrategy,
     EventHooks,
-} from "./lib/utils";
+    MinimalSourceFile,
+    normalizePath,
+} from "./lib/utils/index.js";
 
 export type {
     OptionsReader,
@@ -47,23 +101,33 @@ export type {
     BooleanDeclarationOption,
     ArrayDeclarationOption,
     MixedDeclarationOption,
+    ObjectDeclarationOption,
     MapDeclarationOption,
     FlagsDeclarationOption,
     DeclarationOptionToOptionType,
     SortStrategy,
     ParameterTypeToOptionTypeMap,
     DocumentationEntryPoint,
-} from "./lib/utils";
-
-export type { EventMap, EventCallback } from "./lib/utils/events";
+    ManuallyValidatedOption,
+    EnumKeys,
+    JsDocCompatibility,
+    OutputSpecification,
+} from "./lib/utils/index.js";
 
 export {
     JSONOutput,
     Serializer,
-    SerializerComponent,
+    type SerializerEvents,
+    Deserializer,
+    type Deserializable,
+    type DeserializerComponent,
+    type SerializerComponent,
     SerializeEvent,
-} from "./lib/serialization";
-export type { SerializeEventData } from "./lib/serialization";
+} from "./lib/serialization/index.js";
 
-import * as TypeScript from "typescript";
+export * as Internationalization from "./lib/internationalization/index.js";
+// Re-exported here so that declaration merging works as expected
+export type { TranslatableStrings } from "./lib/internationalization/internationalization.js";
+
+import TypeScript from "typescript";
 export { TypeScript };

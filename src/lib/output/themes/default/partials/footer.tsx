@@ -1,59 +1,51 @@
-import type { Reflection } from "../../../../models";
-import { JSX } from "../../../../utils";
-import type { PageEvent } from "../../../events";
-import { classNames } from "../../lib";
-import type { DefaultThemeRenderContext } from "../DefaultThemeRenderContext";
+import { JSX } from "../../../../utils/index.js";
+import type { DefaultThemeRenderContext } from "../DefaultThemeRenderContext.js";
 
-export function footer(context: DefaultThemeRenderContext, props: PageEvent<Reflection>) {
-    const hideLegend = context.options.getValue("hideLegend");
+export function footer(context: DefaultThemeRenderContext) {
     const hideGenerator = context.options.getValue("hideGenerator");
+    let generatorDisplay = <></>;
+    if (!hideGenerator) {
+        const message = context.i18n.theme_generated_using_typedoc();
+
+        // Only handles one occurrence, but that's all I expect...
+        const index = message.indexOf("TypeDoc");
+        if (index == -1) {
+            generatorDisplay = <p class="tsd-generator">{message}</p>;
+        } else {
+            const pre = message.substring(0, index);
+            const post = message.substring(index + "TypeDoc".length);
+            generatorDisplay = (
+                <p class="tsd-generator">
+                    {pre}
+                    <a href="https://typedoc.org/" target="_blank">
+                        TypeDoc
+                    </a>
+                    {post}
+                </p>
+            );
+        }
+    }
+
+    const customFooterHtml = context.options.getValue("customFooterHtml");
+    let customFooterDisplay = <></>;
+    if (customFooterHtml) {
+        if (context.options.getValue("customFooterHtmlDisableWrapper")) {
+            customFooterDisplay = <JSX.Raw html={customFooterHtml} />;
+        } else {
+            customFooterDisplay = (
+                <p>
+                    <JSX.Raw html={customFooterHtml} />
+                </p>
+            );
+        }
+    }
+
     return (
-        <>
-            <footer
-                class={classNames({
-                    "with-border-bottom": !hideGenerator,
-                })}
-            >
-                <div class="container">
-                    {!hideLegend && props.legend?.length && (
-                        <>
-                            <h2>Legend</h2>
-                            <div class="tsd-legend-group">
-                                {props.legend.map((item) => (
-                                    <ul class="tsd-legend">
-                                        {item.map((item) => (
-                                            <li class={item.classes.join(" ")}>
-                                                <span class="tsd-kind-icon">{item.name}</span>
-                                            </li>
-                                        ))}
-                                    </ul>
-                                ))}
-                            </div>
-                        </>
-                    )}
-
-                    <h2>Settings</h2>
-                    <p>
-                        Theme{" "}
-                        <select id="theme">
-                            <option value="os">OS</option>
-                            <option value="light">Light</option>
-                            <option value="dark">Dark</option>
-                        </select>
-                    </p>
-                </div>
-            </footer>
-
-            {!hideGenerator && (
-                <div class="container tsd-generator">
-                    <p>
-                        {"Generated using "}
-                        <a href="https://typedoc.org/" target="_blank">
-                            TypeDoc
-                        </a>
-                    </p>
-                </div>
-            )}
-        </>
+        <footer>
+            {context.hook("footer.begin", context)}
+            {generatorDisplay}
+            {customFooterDisplay}
+            {context.hook("footer.end", context)}
+        </footer>
     );
 }

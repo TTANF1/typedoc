@@ -1,8 +1,9 @@
 //@ts-check
 
-const { writeFileSync } = require("fs");
-const { addTypeDocOptions } = require("../dist/lib/utils/options/sources");
-const { ParameterType } = require("../dist");
+import { writeFileSync } from "fs";
+import { ParameterType, Internationalization } from "../dist/index.js";
+import { addTypeDocOptions } from "../dist/lib/utils/options/sources/typedoc.js";
+import { SORT_STRATEGIES } from "../dist/lib/utils/sort.js";
 
 const IGNORED_OPTIONS = new Set(["help", "version"]);
 
@@ -13,31 +14,39 @@ const schema = {
     title: "JSON Schema for typedoc.json",
     type: "object",
     properties: {},
+    allowTrailingCommas: true,
 };
 
+const i18n = new Internationalization.Internationalization(null).proxy;
+
 addTypeDocOptions({
-    /** @param {import("../dist").DeclarationOption} option */
+    /** @param {import("../dist/index.js").DeclarationOption} option */
     addDeclaration(option) {
         if (IGNORED_OPTIONS.has(option.name)) return;
 
         const data = {
-            description: option.help,
+            description: option.help(i18n),
         };
 
-        switch (option.type ?? ParameterType.String) {
+        const type = option.type ?? ParameterType.String;
+        switch (type) {
             case ParameterType.Array:
+            case ParameterType.GlobArray:
+            case ParameterType.PathArray:
+            case ParameterType.ModuleArray:
                 data.type = "array";
                 data.items = { type: "string" };
                 data.default =
-                    /** @type {import("../dist").ArrayDeclarationOption} */ (
+                    /** @type {import("../dist/index.js").ArrayDeclarationOption} */ (
                         option
                     ).defaultValue ?? [];
                 break;
             case ParameterType.String:
+            case ParameterType.Path:
                 data.type = "string";
                 if (!IGNORED_DEFAULT_OPTIONS.has(option.name)) {
                     data.default =
-                        /** @type {import("../dist").StringDeclarationOption} */ (
+                        /** @type {import("../dist/index.js").StringDeclarationOption} */ (
                             option
                         ).defaultValue ?? "";
                 }
@@ -45,13 +54,13 @@ addTypeDocOptions({
             case ParameterType.Boolean:
                 data.type = "boolean";
                 data.default =
-                    /** @type {import("../dist").BooleanDeclarationOption} */ (
+                    /** @type {import("../dist/index.js").BooleanDeclarationOption} */ (
                         option
                     ).defaultValue ?? false;
                 break;
             case ParameterType.Number: {
                 const decl =
-                    /** @type {import("../dist").NumberDeclarationOption} */ (
+                    /** @type {import("../dist/index.js").NumberDeclarationOption} */ (
                         option
                     );
                 data.type = "number";
@@ -62,15 +71,19 @@ addTypeDocOptions({
             }
             case ParameterType.Map: {
                 const map =
-                    /** @type {import("../dist").MapDeclarationOption} */ (
+                    /** @type {import("../dist/index.js").MapDeclarationOption} */ (
                         option
                     ).map;
                 data.enum =
                     map instanceof Map
-                        ? [...map.keys()]
-                        : Object.keys(map).filter((key) => isNaN(+key));
+                        ? [...map.values()]
+                        : Object.keys(map)
+                              .filter((key) => isNaN(+key))
+                              .map((key) =>
+                                  typeof map[key] === "number" ? key : map[key],
+                              );
                 data.default =
-                    /** @type {import("../dist").MapDeclarationOption} */ (
+                    /** @type {import("../dist/index.js").MapDeclarationOption} */ (
                         option
                     ).defaultValue;
                 if (!data.enum.includes(data.default)) {
@@ -91,7 +104,7 @@ addTypeDocOptions({
                     properties: {},
                 };
                 const defaults =
-                    /** @type {import("../dist").FlagsDeclarationOption<Record<string, boolean>>} */ (
+                    /** @type {import("../dist/index.js").FlagsDeclarationOption<Record<string, boolean>>} */ (
                         option
                     ).defaults;
 
@@ -105,15 +118,44 @@ addTypeDocOptions({
                 data.default = defaults;
             }
             case ParameterType.Mixed:
-                break; // Nothing to do... TypeDoc really shouldn't have any of these.
+            case ParameterType.Object:
+                data.default =
+                    /** @type {import("../dist/index.js").MixedDeclarationOption} */ (
+                        option
+                    ).defaultValue;
+                break;
+
+            default:
+                /** @type {never} */
+                let _unused = type;
         }
 
         schema.properties[option.name] = data;
     },
 });
 
-schema.properties.logger.enum = ["console", "none"];
-schema.properties.logger.default = "console";
+schema.properties.visibilityFilters.type = "object";
+schema.properties.visibilityFilters.properties = Object.fromEntries(
+    Object.keys(schema.properties.visibilityFilters.default).map((x) => [
+        x,
+        { type: "boolean" },
+    ]),
+);
+schema.properties.visibilityFilters.patternProperties = {
+    "^@": { type: "boolean" },
+};
+schema.properties.visibilityFilters.additionalProperties = false;
+
+schema.properties.compilerOptions.type = "object";
+schema.properties.compilerOptions.markedOptions = "object";
+
+schema.properties.extends = {
+    type: "array",
+    items: { type: "string" },
+};
+
+delete schema.properties.sort.items.type;
+schema.properties.sort.items.enum = SORT_STRATEGIES;
 
 const output = JSON.stringify(schema, null, "\t");
 

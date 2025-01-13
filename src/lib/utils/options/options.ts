@@ -1,19 +1,23 @@
-import type * as ts from "typescript";
-import { ParameterType } from "./declaration";
-import type { NeverIfInternal } from "..";
-import type { Application } from "../../..";
-import { insertPrioritySorted, unique } from "../array";
-import type { Logger } from "../loggers";
+import type ts from "typescript";
+import { resolve } from "path";
+import { ParameterType } from "./declaration.js";
+import type { NeverIfInternal, OutputSpecification } from "../index.js";
+import type { Application } from "../../../index.js";
+import { insertOrderSorted, unique } from "../array.js";
+import type { Logger } from "../loggers.js";
 import {
     convert,
-    DeclarationOption,
+    type DeclarationOption,
     getDefaultValue,
-    KeyToDeclaration,
-    TypeDocOptionMap,
-    TypeDocOptions,
-    TypeDocOptionValues,
-} from "./declaration";
-import { addTypeDocOptions } from "./sources";
+    type KeyToDeclaration,
+    type TypeDocOptionMap,
+    type TypeDocOptions,
+    type TypeDocOptionValues,
+} from "./declaration.js";
+import { addTypeDocOptions } from "./sources/index.js";
+import { getOptionsHelp } from "./help.js";
+import type { TranslationProxy } from "../../internationalization/internationalization.js";
+import { getSimilarValues } from "../general.js";
 
 /**
  * Describes an option reader that discovers user configuration and converts it to the
@@ -21,24 +25,27 @@ import { addTypeDocOptions } from "./sources";
  */
 export interface OptionsReader {
     /**
-     * Readers will be processed according to their priority.
-     * A higher priority indicates that the reader should be called *later* so that
-     * it can override options set by lower priority readers.
+     * Readers will be processed according to their orders.
+     * A higher order indicates that the reader should be called *later*.
      *
      * Note that to preserve expected behavior, the argv reader must have both the lowest
-     * priority so that it may set the location of config files used by other readers and
-     * the highest priority so that it can override settings from lower priority readers.
-     *
-     * Note: In 0.23. `priority` will be renamed to `order`, with the same meaning
+     * order so that it may set the location of config files used by other readers and
+     * the highest order so that it can override settings from lower order readers.
      */
-    priority: number;
+    readonly order: number;
 
     /**
      * The name of this reader so that it may be removed by plugins without the plugin
      * accessing the instance performing the read. Multiple readers may have the same
      * name.
      */
-    name: string;
+    readonly name: string;
+
+    /**
+     * Flag to indicate that this reader should be included in sub-options objects created
+     * to read options for packages mode.
+     */
+    readonly supportsPackages: boolean;
 
     /**
      * Read options from the reader's source and place them in the options parameter.
@@ -46,13 +53,20 @@ export interface OptionsReader {
      * {@link ParameterType.Mixed}. Options which have been declared must be converted to the
      * correct type. As an alternative to doing this conversion in the reader,
      * the reader may use {@link Options.setValue}, which will correctly convert values.
-     * @param options
-     * @param compilerOptions
      * @param container the options container that provides declarations
-     * @param logger
+     * @param logger logger to be used to report errors
+     * @param cwd the directory which should be treated as the current working directory for option file discovery
      */
-    read(container: Options, logger: Logger): void;
+    read(container: Options, logger: Logger, cwd: string): void | Promise<void>;
 }
+
+const optionSnapshots = new WeakMap<
+    { __optionSnapshot: never },
+    {
+        values: Record<string, unknown>;
+        set: Set<string>;
+    }
+>();
 
 /**
  * Maintains a collection of option declarations split into TypeDoc options
@@ -73,6 +87,9 @@ export interface OptionsReader {
  * 3. tsconfig-json (200) - Last config file reader, cannot specify the typedoc.json file to read.
  * 4. argv (300) - Read argv again since any options set there should override those set in config
  *    files.
+ *
+ * @group Common
+ * @summary Contains all of TypeDoc's option declarations & values
  */
 export class Options {
     private _readers: OptionsReader[] = [];
@@ -82,39 +99,63 @@ export class Options {
     private _compilerOptions: ts.CompilerOptions = {};
     private _fileNames: readonly string[] = [];
     private _projectReferences: readonly ts.ProjectReference[] = [];
-    private _logger: Logger;
-
-    constructor(logger: Logger) {
-        this._logger = logger;
-    }
+    private _i18n: TranslationProxy;
 
     /**
-     * Marks the options as readonly, enables caching when fetching options, which improves performance.
+     * In packages mode, the directory of the package being converted.
      */
-    freeze() {
-        Object.freeze(this._values);
-    }
+    packageDir?: string;
 
-    /**
-     * Checks if the options object has been frozen, preventing future changes to option values.
-     */
-    isFrozen() {
-        return Object.isFrozen(this._values);
-    }
-
-    /**
-     * Sets the logger used when an option declaration fails to be added.
-     * @param logger
-     */
-    setLogger(logger: Logger) {
-        this._logger = logger;
-    }
-
-    /**
-     * Adds the option declarations declared by the TypeDoc and all supported TypeScript declarations.
-     */
-    addDefaultDeclarations() {
+    constructor(i18n: TranslationProxy) {
+        this._i18n = i18n;
         addTypeDocOptions(this);
+    }
+
+    /**
+     * Clones the options, intended for use in packages mode.
+     */
+    copyForPackage(packageDir: string): Options {
+        const options = new Options(this._i18n);
+        options.packageDir = packageDir;
+
+        options._readers = this._readers.filter(
+            (reader) => reader.supportsPackages,
+        );
+        options._declarations = new Map(this._declarations);
+        options.reset();
+
+        for (const [key, val] of Object.entries(
+            this.getValue("packageOptions"),
+        )) {
+            options.setValue(key as any, val, packageDir);
+        }
+
+        return options;
+    }
+
+    /**
+     * Take a snapshot of option values now, used in tests only.
+     * @internal
+     */
+    snapshot() {
+        const key = {} as { __optionSnapshot: never };
+
+        optionSnapshots.set(key, {
+            values: { ...this._values },
+            set: new Set(this._setOptions),
+        });
+
+        return key;
+    }
+
+    /**
+     * Take a snapshot of option values now, used in tests only.
+     * @internal
+     */
+    restore(snapshot: { __optionSnapshot: never }) {
+        const data = optionSnapshots.get(snapshot)!;
+        this._values = { ...data.values };
+        this._setOptions = new Set(data.set);
     }
 
     /**
@@ -128,7 +169,7 @@ export class Options {
             const declaration = this.getDeclaration(name);
             if (!declaration) {
                 throw new Error(
-                    "Cannot reset an option which has not been declared."
+                    `Cannot reset an option (${name}) which has not been declared.`,
                 );
             }
 
@@ -150,21 +191,12 @@ export class Options {
      * @param reader
      */
     addReader(reader: OptionsReader): void {
-        insertPrioritySorted(this._readers, reader);
+        insertOrderSorted(this._readers, reader);
     }
 
-    /**
-     * Removes all readers of a given name.
-     * @param name
-     * @deprecated should not be used, will be removed in 0.23
-     */
-    removeReaderByName(name: string): void {
-        this._readers = this._readers.filter((reader) => reader.name !== name);
-    }
-
-    read(logger: Logger) {
+    async read(logger: Logger, cwd = process.cwd()) {
         for (const reader of this._readers) {
-            reader.read(this, logger);
+            await reader.read(this, logger, cwd);
         }
     }
 
@@ -174,7 +206,7 @@ export class Options {
      * @param declaration The option declaration that should be added.
      */
     addDeclaration<K extends keyof TypeDocOptions>(
-        declaration: { name: K } & KeyToDeclaration<K>
+        declaration: { name: K } & KeyToDeclaration<K>,
     ): void;
 
     /**
@@ -182,45 +214,19 @@ export class Options {
      * @param declaration The option declaration that should be added.
      */
     addDeclaration(
-        declaration: NeverIfInternal<Readonly<DeclarationOption>>
+        declaration: NeverIfInternal<Readonly<DeclarationOption>>,
     ): void;
     addDeclaration(declaration: Readonly<DeclarationOption>): void {
         const decl = this.getDeclaration(declaration.name);
         if (decl) {
-            this._logger.error(
-                `The option ${declaration.name} has already been registered`
+            throw new Error(
+                `The option ${declaration.name} has already been registered`,
             );
         } else {
             this._declarations.set(declaration.name, declaration);
         }
 
         this._values[declaration.name] = getDefaultValue(declaration);
-    }
-
-    /**
-     * Adds the given declarations to the container
-     * @param declarations
-     * @deprecated will be removed in 0.23.
-     */
-    addDeclarations(declarations: readonly DeclarationOption[]): void {
-        for (const decl of declarations) {
-            this.addDeclaration(decl as any);
-        }
-    }
-
-    /**
-     * Removes a declared option.
-     * WARNING: This is probably a bad idea. If you do this you will probably cause a crash
-     * when code assumes that an option that it declared still exists.
-     * @param name
-     * @deprecated will be removed in 0.23.
-     */
-    removeDeclarationByName(name: string): void {
-        const declaration = this.getDeclaration(name);
-        if (declaration) {
-            this._declarations.delete(declaration.name);
-            delete this._values[declaration.name];
-        }
     }
 
     /**
@@ -246,7 +252,9 @@ export class Options {
     isSet(name: NeverIfInternal<string>): boolean;
     isSet(name: string): boolean {
         if (!this._declarations.has(name)) {
-            throw new Error("Tried to check if an undefined option was set");
+            throw new Error(
+                `Tried to check if an undefined option (${name}) was set`,
+            );
         }
         return this._setOptions.has(name);
     }
@@ -267,7 +275,13 @@ export class Options {
     getValue(name: string): unknown {
         const declaration = this.getDeclaration(name);
         if (!declaration) {
-            throw new Error(`Unknown option '${name}'`);
+            const nearNames = this.getSimilarOptions(name);
+            throw new Error(
+                this._i18n.unknown_option_0_you_may_have_meant_1(
+                    name,
+                    nearNames.join("\n\t"),
+                ),
+            );
         }
 
         return this._values[declaration.name];
@@ -282,35 +296,55 @@ export class Options {
     setValue<K extends keyof TypeDocOptions>(
         name: K,
         value: TypeDocOptions[K],
-        configPath?: string
+        configPath?: string,
     ): void;
     setValue(
         name: NeverIfInternal<string>,
         value: NeverIfInternal<unknown>,
-        configPath?: NeverIfInternal<string>
+        configPath?: NeverIfInternal<string>,
     ): void;
     setValue(name: string, value: unknown, configPath?: string): void {
-        if (this.isFrozen()) {
+        const declaration = this.getDeclaration(name);
+        if (!declaration) {
+            const nearNames = this.getSimilarOptions(name);
             throw new Error(
-                "Tried to modify an option value after options have been sealed."
+                this._i18n.unknown_option_0_you_may_have_meant_1(
+                    name,
+                    nearNames.join("\n\t"),
+                ),
             );
         }
 
-        const declaration = this.getDeclaration(name);
-        if (!declaration) {
-            throw new Error(
-                `Tried to set an option (${name}) that was not declared.`
-            );
+        let oldValue = this._values[declaration.name];
+        if (typeof oldValue === "undefined") {
+            oldValue = getDefaultValue(declaration);
         }
 
         const converted = convert(
             value,
             declaration,
-            configPath ?? process.cwd()
+            this._i18n,
+            configPath ?? process.cwd(),
+            oldValue,
         );
 
         if (declaration.type === ParameterType.Flags) {
-            Object.assign(this._values[declaration.name], converted);
+            this._values[declaration.name] = Object.assign(
+                {},
+                this._values[declaration.name],
+                converted,
+            );
+        } else if (declaration.name === "outputs") {
+            // This is very unfortunate... there's probably some smarter way to define options
+            // so that this can be done intelligently via the convert function.
+            this._values[declaration.name] = (
+                converted as OutputSpecification[]
+            ).map((c) => {
+                return {
+                    ...c,
+                    path: resolve(configPath ?? process.cwd(), c.path),
+                };
+            });
         } else {
             this._values[declaration.name] = converted;
         }
@@ -326,14 +360,16 @@ export class Options {
 
     /** @internal */
     fixCompilerOptions(
-        options: Readonly<ts.CompilerOptions>
+        options: Readonly<ts.CompilerOptions>,
     ): ts.CompilerOptions {
+        const overrides = this.getValue("compilerOptions");
         const result = { ...options };
 
-        if (
-            this.getValue("emit") !== "both" &&
-            this.getValue("emit") !== true
-        ) {
+        if (overrides) {
+            Object.assign(result, overrides);
+        }
+
+        if (this.getValue("emit") !== "both") {
             result.noEmit = true;
             delete result.emitDeclarationOnly;
         }
@@ -361,14 +397,8 @@ export class Options {
     setCompilerOptions(
         fileNames: readonly string[],
         options: ts.CompilerOptions,
-        projectReferences: readonly ts.ProjectReference[] | undefined
+        projectReferences: readonly ts.ProjectReference[] | undefined,
     ) {
-        if (this.isFrozen()) {
-            throw new Error(
-                "Tried to modify an option value after options have been sealed."
-            );
-        }
-
         // We do this here instead of in the tsconfig reader so that API consumers which
         // supply a program to `Converter.convert` instead of letting TypeDoc create one
         // can just set the compiler options, and not need to know about this mapping.
@@ -381,55 +411,46 @@ export class Options {
         this._compilerOptions = { ...options };
         this._projectReferences = projectReferences ?? [];
     }
+
+    /**
+     * Discover similar option names to the given name, for use in error reporting.
+     */
+    getSimilarOptions(missingName: string): string[] {
+        return getSimilarValues(this._declarations.keys(), missingName);
+    }
+
+    /**
+     * Get the help message to be displayed to the user if `--help` is passed.
+     */
+    getHelp(i18n: TranslationProxy) {
+        return getOptionsHelp(this, i18n);
+    }
 }
 
 /**
- * Binds an option to the given property. Does not register the option.
+ * Binds an option to an accessor. Does not register the option.
  *
- * @since v0.16.3
+ * Note: This is a standard ES decorator. It will not work with pre-TS 5.0 experimental decorators enabled.
  */
-export function BindOption<K extends keyof TypeDocOptionMap>(
-    name: K
-): <IK extends PropertyKey>(
-    target: ({ application: Application } | { options: Options }) & {
-        [K2 in IK]: TypeDocOptionValues[K];
-    },
-    key: IK
-) => void;
-
-/**
- * Binds an option to the given property. Does not register the option.
- * @since v0.16.3
- *
- * @privateRemarks
- * This overload is intended for plugin use only with looser type checks. Do not use internally.
- */
-export function BindOption(
-    name: NeverIfInternal<string>
-): (
-    target: { application: Application } | { options: Options },
-    key: PropertyKey
-) => void;
-
-export function BindOption(name: string) {
-    return function (
-        target: { application: Application } | { options: Options },
-        key: PropertyKey
-    ) {
-        Object.defineProperty(target, key, {
+export function Option<K extends keyof TypeDocOptionMap>(name: K) {
+    return (
+        _: unknown,
+        _context: ClassAccessorDecoratorContext<
+            { application: Application } | { options: Options },
+            TypeDocOptionValues[K]
+        >,
+    ) => {
+        return {
             get(this: { application: Application } | { options: Options }) {
                 const options =
                     "options" in this ? this.options : this.application.options;
-                const value = options.getValue(name as keyof TypeDocOptions);
-
-                if (options.isFrozen()) {
-                    Object.defineProperty(this, key, { value });
-                }
-
-                return value;
+                return options.getValue(name);
             },
-            enumerable: true,
-            configurable: true,
-        });
+            set(_value: never) {
+                throw new Error(
+                    `Options may not be set via the Option decorator when setting ${name}`,
+                );
+            },
+        };
     };
 }

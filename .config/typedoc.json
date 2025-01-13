@@ -1,19 +1,79 @@
 {
     "$schema": "https://typedoc.org/schema.json",
     "intentionallyNotExported": [
-        "ComponentClass",
-        "AbstractComponent",
-        "ConverterComponent",
-        "RendererComponent",
         "SORT_STRATEGIES",
-        "_ModelToObject"
+        "_ModelToObject",
+        "EventHooksMomento",
+        "MarkedPlugin",
+        "MeaningKeywords"
     ],
-    "entryPoints": ["../src"],
-    "entryPointStrategy": "Resolve",
+    "sort": [
+        "kind",
+        "instance-first",
+        "required-first",
+        "alphabetical-ignoring-documents"
+    ],
+    "name": "TypeDoc API",
+
+    // Don't document the debug entry point
+    "entryPoints": ["../src/index.ts"],
+    "outputs": [
+        {
+            "name": "html",
+            "path": "../docs"
+        },
+        {
+            "name": "json",
+            "path": "../docs/docs.json"
+        }
+    ],
+
     "excludeExternals": true,
+    "excludeInternal": false,
     "excludePrivate": true,
-    "excludeInternal": true,
+    // "excludeReferences": true,
+    "groupReferencesByType": true,
+    "jsDocCompatibility": false,
     "treatWarningsAsErrors": false,
-    "validation": true,
-    "logLevel": "Verbose"
+    "categorizeByGroup": false,
+    "categoryOrder": ["Reflections", "Types", "Comments", "*"],
+    "groupOrder": ["Common", "Namespaces", "*"],
+    "hostedBaseUrl": "https://typedoc.org/example/",
+    "navigationLinks": {
+        "Docs": "https://typedoc.org",
+        "Example": "https://typedoc.org/example/index.html",
+        "GitHub": "https://github.com/TypeStrong/typedoc"
+    },
+    "validation": {
+        "notExported": true,
+        "invalidLink": true,
+        "notDocumented": false
+    },
+    "visibilityFilters": {
+        "protected": false,
+        "private": false,
+        "inherited": true,
+        "external": false,
+        "@internal": false
+    },
+    "searchInComments": true,
+    "searchInDocuments": true,
+    "searchGroupBoosts": {
+        "Classes": 2.0,
+        "Interfaces": 2.0,
+        "Enumerations": 2.0,
+        "Type Aliases": 2.0
+    },
+    "navigation": {
+        "includeCategories": true,
+        "includeGroups": false,
+        "excludeReferences": true
+    },
+    "includeVersion": true,
+    "logLevel": "Verbose",
+    "externalSymbolLinkMappings": {
+        "@types/markdown-it": {
+            "MarkdownIt": "https://markdown-it.github.io/markdown-it/#MarkdownIt"
+        }
+    }
 }

@@ -1,124 +1,267 @@
-import type { Theme as ShikiTheme } from "shiki";
-import type { LogLevel } from "../loggers";
-import type { SortStrategy } from "../sort";
+import type { BundledTheme as ShikiTheme } from "@gerrit0/mini-shiki";
+import type { LogLevel } from "../loggers.js";
+import type { SortStrategy } from "../sort.js";
 import { isAbsolute, join, resolve } from "path";
-import type { EntryPointStrategy } from "../entry-point";
-import type { ReflectionKind } from "../../models/reflections/kind";
+import type { EntryPointStrategy } from "../entry-point.js";
+import type { ReflectionKind } from "../../models/reflections/kind.js";
+import type { NeverIfInternal } from "../index.js";
+import type {
+    TranslatedString,
+    TranslationProxy,
+} from "../../internationalization/internationalization.js";
 
+/** @enum */
 export const EmitStrategy = {
-    true: true, // Alias for both, for backwards compatibility until 0.23
-    false: false, // Alias for docs, for backwards compatibility until 0.23
     both: "both", // Emit both documentation and JS
     docs: "docs", // Emit documentation, but not JS (default)
     none: "none", // Emit nothing, just convert and run validation
 } as const;
 /** @hidden */
-export type EmitStrategy = typeof EmitStrategy[keyof typeof EmitStrategy];
+export type EmitStrategy = (typeof EmitStrategy)[keyof typeof EmitStrategy];
+
+/**
+ * Determines how TypeDoc searches for comments.
+ * @enum
+ */
+export const CommentStyle = {
+    JSDoc: "jsdoc",
+    Block: "block",
+    Line: "line",
+    All: "all",
+} as const;
+export type CommentStyle = (typeof CommentStyle)[keyof typeof CommentStyle];
+
+export type OutputSpecification = {
+    name: string;
+    path: string;
+    options?: Partial<TypeDocOptions>;
+};
 
 /**
  * An interface describing all TypeDoc specific options. Generated from a
  * map which contains more information about each option for better types when
  * defining said options.
+ * @interface
  */
 export type TypeDocOptions = {
     [K in keyof TypeDocOptionMap]: unknown extends TypeDocOptionMap[K]
         ? unknown
-        : TypeDocOptionMap[K] extends string | string[] | number | boolean
-        ? TypeDocOptionMap[K]
-        : TypeDocOptionMap[K] extends Record<string, boolean>
-        ? Partial<TypeDocOptionMap[K]> | boolean
-        :
-              | keyof TypeDocOptionMap[K]
-              | TypeDocOptionMap[K][keyof TypeDocOptionMap[K]];
+        : TypeDocOptionMap[K] extends ManuallyValidatedOption<
+                infer ManuallyValidated
+            >
+          ? ManuallyValidated
+          : TypeDocOptionMap[K] extends string | string[] | number | boolean
+            ? TypeDocOptionMap[K]
+            : TypeDocOptionMap[K] extends Record<string, boolean>
+              ? Partial<TypeDocOptionMap[K]> | boolean
+              :
+                    | keyof TypeDocOptionMap[K]
+                    | TypeDocOptionMap[K][keyof TypeDocOptionMap[K]];
 };
 
 /**
  * Describes all TypeDoc specific options as returned by {@link Options.getValue}, this is
  * slightly more restrictive than the {@link TypeDocOptions} since it does not allow both
- * keys and values for mapped option types, and does nto allow partials of flag values.
+ * keys and values for mapped option types, and does not allow partials of flag values.
+ * @interface
  */
 export type TypeDocOptionValues = {
     [K in keyof TypeDocOptionMap]: unknown extends TypeDocOptionMap[K]
         ? unknown
-        : TypeDocOptionMap[K] extends
-              | string
-              | string[]
-              | number
-              | boolean
-              | Record<string, boolean>
-        ? TypeDocOptionMap[K]
-        : TypeDocOptionMap[K][keyof TypeDocOptionMap[K]];
+        : TypeDocOptionMap[K] extends ManuallyValidatedOption<
+                infer ManuallyValidated
+            >
+          ? ManuallyValidated
+          : TypeDocOptionMap[K] extends
+                  | string
+                  | string[]
+                  | number
+                  | boolean
+                  | Record<string, boolean>
+            ? TypeDocOptionMap[K]
+            : TypeDocOptionMap[K][keyof TypeDocOptionMap[K]];
 };
 
 /**
  * Describes all TypeDoc options. Used internally to provide better types when fetching options.
  * External consumers should likely use {@link TypeDocOptions} instead.
+ *
+ * If writing a plugin, you may find it useful to use declaration merging to add your options to this interface
+ * so that you have autocomplete when using `app.options.getValue`.
+ *
+ * ```ts
+ * declare module "typedoc" {
+ *   export interface TypeDocOptionMap {
+ *     pluginOption: string[];
+ *   }
+ * }
+ * ```
  */
 export interface TypeDocOptionMap {
+    // Configuration
     options: string;
     tsconfig: string;
+    compilerOptions: unknown;
+    plugin: string[];
+    lang: string;
+    locales: ManuallyValidatedOption<Record<string, Record<string, string>>>;
+    packageOptions: ManuallyValidatedOption<TypeDocOptions>;
 
+    // Input
     entryPoints: string[];
     entryPointStrategy: typeof EntryPointStrategy;
-
+    alwaysCreateEntryPointModule: boolean;
+    projectDocuments: string[];
     exclude: string[];
     externalPattern: string[];
     excludeExternals: boolean;
+    excludeNotDocumented: boolean;
+    excludeNotDocumentedKinds: ReflectionKind.KindString[];
+    excludeInternal: boolean;
     excludePrivate: boolean;
     excludeProtected: boolean;
-    excludeNotDocumented: boolean;
-    excludeInternal: boolean;
+    excludeReferences: boolean;
+    excludeCategories: string[];
+    maxTypeConversionDepth: number;
+    name: string;
+    includeVersion: boolean;
     disableSources: boolean;
-    includes: string;
-    media: string;
+    sourceLinkTemplate: string;
+    sourceLinkExternal: boolean;
+    markdownLinkExternal: boolean;
+    disableGit: boolean;
+    gitRevision: string;
+    gitRemote: string;
+    readme: string;
 
-    emit: typeof EmitStrategy;
-    watch: boolean;
-    preserveWatchOutput: boolean;
-
-    out: string;
-    json: string;
+    // Output
+    outputs: ManuallyValidatedOption<Array<OutputSpecification>>;
+    out: string; // default output directory
+    html: string; // shortcut for defining html output
+    json: string; // shortcut for defining json output
     pretty: boolean;
-
+    emit: typeof EmitStrategy;
     theme: string;
     lightHighlightTheme: ShikiTheme;
     darkHighlightTheme: ShikiTheme;
+    highlightLanguages: string[];
+    ignoredHighlightLanguages: string[];
+    typePrintWidth: number;
     customCss: string;
+    customJs: string;
+    markdownItOptions: ManuallyValidatedOption<Record<string, unknown>>;
+    /**
+     * Will be called when TypeDoc is setting up the markdown parser to use to render markdown.
+     * Can be used to add markdown-it plugins to the parser with code like this:
+     *
+     * ```ts
+     * // typedoc.config.mjs
+     * import iterator from "markdown-it-for-inline";
+     * export default {
+     *     /** @param {MarkdownIt} parser *\/
+     *     markdownItLoader(parser) {
+     *         parser.use(iterator, "foo_replace", "text", function(tokens, idx) {
+     *             tokens[idx].content = tokens[idx].content.replace(/foo/g, 'bar');
+     *         });
+     *     }
+     * }
+     * ```
+     *
+     * Note: Unfortunately, markdown-it doesn't ship its own types, so `parser` isn't
+     * strictly typed here.
+     */
+    markdownItLoader: ManuallyValidatedOption<(parser: any) => void>;
+    basePath: string;
+    cname: string;
+    favicon: string;
+    githubPages: boolean;
+    hostedBaseUrl: string;
+    useHostedBaseUrlForAbsoluteLinks: boolean;
+    cacheBust: boolean;
+    hideGenerator: boolean;
+    customFooterHtml: string;
+    customFooterHtmlDisableWrapper: boolean;
+    searchInComments: boolean;
+    searchInDocuments: boolean;
+    cleanOutputDir: boolean;
+    titleLink: string;
+    navigationLinks: ManuallyValidatedOption<Record<string, string>>;
+    sidebarLinks: ManuallyValidatedOption<Record<string, string>>;
+    navigationLeaves: string[];
+    navigation: {
+        includeCategories: boolean;
+        includeGroups: boolean;
+        includeFolders: boolean;
+        compactFolders: boolean;
+        excludeReferences: boolean;
+    };
+    headings: {
+        readme: boolean;
+        document: boolean;
+    };
+    sluggerConfiguration: {
+        lowercase: boolean;
+    };
+    includeHierarchySummary: boolean;
+    visibilityFilters: ManuallyValidatedOption<{
+        protected?: boolean;
+        private?: boolean;
+        inherited?: boolean;
+        external?: boolean;
+        [tag: `@${string}`]: boolean;
+    }>;
+    searchCategoryBoosts: ManuallyValidatedOption<Record<string, number>>;
+    searchGroupBoosts: ManuallyValidatedOption<Record<string, number>>;
+    useFirstParagraphOfCommentAsSummary: boolean;
 
-    name: string;
-    includeVersion: boolean;
-    excludeTags: string[];
-    readme: string;
+    // Comment
+    commentStyle: typeof CommentStyle;
+    useTsLinkResolution: boolean;
+    preserveLinkText: boolean;
+    jsDocCompatibility: JsDocCompatibility;
+    suppressCommentWarningsInDeclarationFiles: boolean;
+    blockTags: `@${string}`[];
+    inlineTags: `@${string}`[];
+    modifierTags: `@${string}`[];
+    excludeTags: `@${string}`[];
+    notRenderedTags: `@${string}`[];
+    externalSymbolLinkMappings: ManuallyValidatedOption<
+        Record<string, Record<string, string>>
+    >;
+    cascadedModifierTags: `@${string}`[];
+
+    // Organization
+    categorizeByGroup: boolean;
+    groupReferencesByType: boolean;
     defaultCategory: string;
     categoryOrder: string[];
-    categorizeByGroup: boolean;
-    cname: string;
+    groupOrder: string[];
     sort: SortStrategy[];
-    gitRevision: string;
-    gitRemote: string;
-    gaID: string;
-    gaSite: string;
-    githubPages: boolean;
-    hideGenerator: boolean;
-    hideLegend: boolean;
-    cleanOutputDir: boolean;
-
-    help: boolean;
-    version: boolean;
-    showConfig: boolean;
-    plugin: string[];
-    logger: unknown; // string | Function
-    logLevel: typeof LogLevel;
-    markedOptions: unknown;
+    sortEntryPoints: boolean;
+    kindSortOrder: ReflectionKind.KindString[];
 
     // Validation
     treatWarningsAsErrors: boolean;
+    treatValidationWarningsAsErrors: boolean;
     intentionallyNotExported: string[];
-    /** @deprecated use validation.invalidLink */
-    listInvalidSymbolLinks: boolean;
     validation: ValidationOptions;
-    requiredToBeDocumented: (keyof typeof ReflectionKind)[];
+    requiredToBeDocumented: ReflectionKind.KindString[];
+
+    // Other
+    watch: boolean;
+    preserveWatchOutput: boolean;
+    help: boolean;
+    version: boolean;
+    showConfig: boolean;
+    logLevel: typeof LogLevel;
+    skipErrorChecking: boolean;
 }
+
+/**
+ * Wrapper type for values in TypeDocOptionMap which are represented with an unknown option type, but
+ * have a validation function that checks that they are the given type.
+ */
+export type ManuallyValidatedOption<T> = { __validated: T };
 
 export type ValidationOptions = {
     /**
@@ -127,13 +270,44 @@ export type ValidationOptions = {
      */
     notExported: boolean;
     /**
-     * If set, TypeDoc will produce warnings about \{&amp;link\} tags which will produce broken links.
+     * If set, TypeDoc will produce warnings about \{\@link\} tags which will produce broken links.
      */
     invalidLink: boolean;
+    /**
+     * If set, TypeDoc will produce warnings about \{\@link\} tags which do not link directly to their target.
+     */
+    rewrittenLink: boolean;
     /**
      * If set, TypeDoc will produce warnings about declarations that do not have doc comments
      */
     notDocumented: boolean;
+    /**
+     * If set, TypeDoc will produce warnings about `@mergeModuleWith` tags which were not resolved.
+     */
+    unusedMergeModuleWith: boolean;
+};
+
+export type JsDocCompatibility = {
+    /**
+     * If set, TypeDoc will treat `@example` blocks as code unless they contain a code block.
+     * On by default, this is how VSCode renders blocks.
+     */
+    exampleTag: boolean;
+    /**
+     * If set, TypeDoc will treat `@default` blocks as code unless they contain a code block.
+     * On by default, this is how VSCode renders blocks.
+     */
+    defaultTag: boolean;
+    /**
+     * If set, TypeDoc will warn if a `@inheritDoc` tag is spelled without TSDoc capitalization
+     * (i.e. `@inheritdoc`). On by default.
+     */
+    inheritDocTag: boolean;
+    /**
+     * If set, TypeDoc will not emit warnings about unescaped `{` and `}` characters encountered
+     * when parsing a comment. On by default.
+     */
+    ignoreUnescapedBraces: boolean;
 };
 
 /**
@@ -143,18 +317,35 @@ export type KeyToDeclaration<K extends keyof TypeDocOptionMap> =
     TypeDocOptionMap[K] extends boolean
         ? BooleanDeclarationOption
         : TypeDocOptionMap[K] extends string
-        ? StringDeclarationOption
-        : TypeDocOptionMap[K] extends number
-        ? NumberDeclarationOption
-        : TypeDocOptionMap[K] extends string[]
-        ? ArrayDeclarationOption
-        : unknown extends TypeDocOptionMap[K]
-        ? MixedDeclarationOption
-        : TypeDocOptionMap[K] extends Record<string, boolean>
-        ? FlagsDeclarationOption<TypeDocOptionMap[K]>
-        : TypeDocOptionMap[K] extends Record<string | number, infer U>
-        ? MapDeclarationOption<U>
-        : never;
+          ? StringDeclarationOption
+          : TypeDocOptionMap[K] extends number
+            ? NumberDeclarationOption
+            : TypeDocOptionMap[K] extends string[]
+              ? ArrayDeclarationOption
+              : unknown extends TypeDocOptionMap[K]
+                ? MixedDeclarationOption | ObjectDeclarationOption
+                : TypeDocOptionMap[K] extends ManuallyValidatedOption<unknown>
+                  ?
+                        | (MixedDeclarationOption & {
+                              validate(
+                                  value: unknown,
+                                  i18n: TranslationProxy,
+                              ): void;
+                          })
+                        | (ObjectDeclarationOption & {
+                              validate(
+                                  value: unknown,
+                                  i18n: TranslationProxy,
+                              ): void;
+                          })
+                  : TypeDocOptionMap[K] extends Record<string, boolean>
+                    ? FlagsDeclarationOption<TypeDocOptionMap[K]>
+                    : TypeDocOptionMap[K] extends Record<
+                            string | number,
+                            infer U
+                        >
+                      ? MapDeclarationOption<U>
+                      : never;
 
 export enum ParameterHint {
     File,
@@ -185,6 +376,10 @@ export enum ParameterType {
      */
     GlobArray,
     /**
+     * An object which partially merges user-set values into the defaults.
+     */
+    Object,
+    /**
      * An object with true/false flags
      */
     Flags,
@@ -198,14 +393,24 @@ export interface DeclarationOptionBase {
 
     /**
      * The help text to be displayed to the user when --help is passed.
+     *
+     * This may be a string, which will be presented directly, or a function,
+     * which will be called with an {@link TranslationProxy} so that option help
+     * can be translated into the user specified locale.
      */
-    help: string;
+    help: NeverIfInternal<string> | ((i18n: TranslationProxy) => string);
 
     /**
      * The parameter type, used to convert user configuration values into the expected type.
      * If not set, the type will be a string.
      */
     type?: ParameterType;
+
+    /**
+     * If set, this option will be omitted from `--help`, and attempting to specify it on the command
+     * line will produce an error.
+     */
+    configFileOnly?: boolean;
 }
 
 export interface StringDeclarationOption extends DeclarationOptionBase {
@@ -226,10 +431,20 @@ export interface StringDeclarationOption extends DeclarationOptionBase {
     hint?: ParameterHint;
 
     /**
+     * If specified, when this output is specified TypeDoc will automatically add
+     * an output to the `outputs` option whose name is the value of this property with
+     * the path set to the value of this option. Should only be used with `type`
+     * set to {@link ParameterType.Path}.
+     *
+     * If any output shortcuts are set, the `outputs` option will be ignored.
+     */
+    outputShortcut?: string;
+
+    /**
      * An optional validation function that validates a potential value of this option.
      * The function must throw an Error if the validation fails and should do nothing otherwise.
      */
-    validate?: (value: string) => void;
+    validate?: (value: string, i18n: TranslationProxy) => void;
 }
 
 export interface NumberDeclarationOption extends DeclarationOptionBase {
@@ -254,7 +469,7 @@ export interface NumberDeclarationOption extends DeclarationOptionBase {
      * An optional validation function that validates a potential value of this option.
      * The function must throw an Error if the validation fails and should do nothing otherwise.
      */
-    validate?: (value: number) => void;
+    validate?: (value: number, i18n: TranslationProxy) => void;
 }
 
 export interface BooleanDeclarationOption extends DeclarationOptionBase {
@@ -276,13 +491,13 @@ export interface ArrayDeclarationOption extends DeclarationOptionBase {
     /**
      * If not specified defaults to an empty array.
      */
-    defaultValue?: string[];
+    defaultValue?: readonly string[];
 
     /**
      * An optional validation function that validates a potential value of this option.
      * The function must throw an Error if the validation fails and should do nothing otherwise.
      */
-    validate?: (value: string[]) => void;
+    validate?: (value: string[], i18n: TranslationProxy) => void;
 }
 
 export interface MixedDeclarationOption extends DeclarationOptionBase {
@@ -297,9 +512,23 @@ export interface MixedDeclarationOption extends DeclarationOptionBase {
      * An optional validation function that validates a potential value of this option.
      * The function must throw an Error if the validation fails and should do nothing otherwise.
      */
-    validate?: (value: unknown) => void;
+    validate?: (value: unknown, i18n: TranslationProxy) => void;
 }
 
+export interface ObjectDeclarationOption extends DeclarationOptionBase {
+    type: ParameterType.Object;
+
+    /**
+     * If not specified defaults to undefined.
+     */
+    defaultValue?: unknown;
+
+    /**
+     * An optional validation function that validates a potential value of this option.
+     * The function must throw an Error if the validation fails and should do nothing otherwise.
+     */
+    validate?: (value: unknown, i18n: TranslationProxy) => void;
+}
 export interface MapDeclarationOption<T> extends DeclarationOptionBase {
     type: ParameterType.Map;
 
@@ -315,11 +544,6 @@ export interface MapDeclarationOption<T> extends DeclarationOptionBase {
      * The default value for a mapped type must be specified.
      */
     defaultValue: T;
-
-    /**
-     * Optional override for the error reported when an invalid key is provided.
-     */
-    mapError?: string;
 }
 
 export interface FlagsDeclarationOption<T extends Record<string, boolean>>
@@ -337,6 +561,7 @@ export type DeclarationOption =
     | NumberDeclarationOption
     | BooleanDeclarationOption
     | MixedDeclarationOption
+    | ObjectDeclarationOption
     | MapDeclarationOption<unknown>
     | ArrayDeclarationOption
     | FlagsDeclarationOption<Record<string, boolean>>;
@@ -347,6 +572,7 @@ export interface ParameterTypeToOptionTypeMap {
     [ParameterType.Number]: number;
     [ParameterType.Boolean]: boolean;
     [ParameterType.Mixed]: unknown;
+    [ParameterType.Object]: unknown;
     [ParameterType.Array]: string[];
     [ParameterType.PathArray]: string[];
     [ParameterType.ModuleArray]: string[];
@@ -361,51 +587,60 @@ export type DeclarationOptionToOptionType<T extends DeclarationOption> =
     T extends MapDeclarationOption<infer U>
         ? U
         : T extends FlagsDeclarationOption<infer U>
-        ? U
-        : ParameterTypeToOptionTypeMap[Exclude<T["type"], undefined>];
+          ? U
+          : ParameterTypeToOptionTypeMap[Exclude<T["type"], undefined>];
 
 const converters: {
     [K in ParameterType]: (
         value: unknown,
         option: DeclarationOption & { type: K },
-        configPath: string
+        i18n: TranslationProxy,
+        configPath: string,
+        oldValue: unknown,
     ) => ParameterTypeToOptionTypeMap[K];
 } = {
-    [ParameterType.String](value, option) {
+    [ParameterType.String](value, option, i18n) {
+        // eslint-disable-next-line @typescript-eslint/no-base-to-string
         const stringValue = value == null ? "" : String(value);
-        option.validate?.(stringValue);
+        option.validate?.(stringValue, i18n);
         return stringValue;
     },
-    [ParameterType.Path](value, option, configPath) {
+    [ParameterType.Path](value, option, i18n, configPath) {
         const stringValue =
+            // eslint-disable-next-line @typescript-eslint/no-base-to-string
             value == null ? "" : resolve(configPath, String(value));
-        option.validate?.(stringValue);
+        option.validate?.(stringValue, i18n);
         return stringValue;
     },
-    [ParameterType.Number](value, option) {
+    [ParameterType.Number](value, option, i18n) {
         const numValue = parseInt(String(value), 10) || 0;
         if (!valueIsWithinBounds(numValue, option.minValue, option.maxValue)) {
             throw new Error(
-                getBoundsError(option.name, option.minValue, option.maxValue)
+                getBoundsError(
+                    option.name,
+                    i18n,
+                    option.minValue,
+                    option.maxValue,
+                ),
             );
         }
-        option.validate?.(numValue);
+        option.validate?.(numValue, i18n);
         return numValue;
     },
     [ParameterType.Boolean](value) {
         return !!value;
     },
-    [ParameterType.Array](value, option) {
+    [ParameterType.Array](value, option, i18n) {
         let strArrValue = new Array<string>();
         if (Array.isArray(value)) {
             strArrValue = value.map(String);
         } else if (typeof value === "string") {
             strArrValue = [value];
         }
-        option.validate?.(strArrValue);
+        option.validate?.(strArrValue, i18n);
         return strArrValue;
     },
-    [ParameterType.PathArray](value, option, configPath) {
+    [ParameterType.PathArray](value, option, i18n, configPath) {
         let strArrValue = new Array<string>();
         if (Array.isArray(value)) {
             strArrValue = value.map(String);
@@ -413,10 +648,10 @@ const converters: {
             strArrValue = [value];
         }
         strArrValue = strArrValue.map((path) => resolve(configPath, path));
-        option.validate?.(strArrValue);
+        option.validate?.(strArrValue, i18n);
         return strArrValue;
     },
-    [ParameterType.ModuleArray](value, option, configPath) {
+    [ParameterType.ModuleArray](value, option, i18n, configPath) {
         let strArrValue = new Array<string>();
         if (Array.isArray(value)) {
             strArrValue = value.map(String);
@@ -424,10 +659,10 @@ const converters: {
             strArrValue = [value];
         }
         strArrValue = resolveModulePaths(strArrValue, configPath);
-        option.validate?.(strArrValue);
+        option.validate?.(strArrValue, i18n);
         return strArrValue;
     },
-    [ParameterType.GlobArray](value, option, configPath) {
+    [ParameterType.GlobArray](value, option, i18n, configPath) {
         let strArrValue = new Array<string>();
         if (Array.isArray(value)) {
             strArrValue = value.map(String);
@@ -435,10 +670,10 @@ const converters: {
             strArrValue = [value];
         }
         strArrValue = resolveGlobPaths(strArrValue, configPath);
-        option.validate?.(strArrValue);
+        option.validate?.(strArrValue, i18n);
         return strArrValue;
     },
-    [ParameterType.Map](value, option) {
+    [ParameterType.Map](value, option, i18n) {
         const key = String(value);
         if (option.map instanceof Map) {
             if (option.map.has(key)) {
@@ -454,24 +689,28 @@ const converters: {
         } else if (Object.values(option.map).includes(value)) {
             return value;
         }
-        throw new Error(
-            option.mapError ?? getMapError(option.map, option.name)
-        );
+        throw new Error(getMapError(option.map, i18n, option.name));
     },
-    [ParameterType.Mixed](value, option) {
-        option.validate?.(value);
+    [ParameterType.Mixed](value, option, i18n) {
+        option.validate?.(value, i18n);
         return value;
     },
-    [ParameterType.Flags](value, option) {
+    [ParameterType.Object](value, option, i18n, _configPath, oldValue) {
+        option.validate?.(value, i18n);
+        if (typeof oldValue !== "undefined")
+            value = { ...(oldValue as object), ...(value as object) };
+        return value;
+    },
+    [ParameterType.Flags](value, option, i18n) {
         if (typeof value === "boolean") {
             value = Object.fromEntries(
-                Object.keys(option.defaults).map((key) => [key, value])
+                Object.keys(option.defaults).map((key) => [key, value]),
             );
         }
 
         if (typeof value !== "object" || value == null) {
             throw new Error(
-                `Expected an object with flag values for ${option.name} or true/false`
+                i18n.expected_object_with_flag_values_for_0(option.name),
             );
         }
         const obj = { ...value } as Record<string, unknown>;
@@ -479,11 +718,11 @@ const converters: {
         for (const key of Object.keys(obj)) {
             if (!Object.prototype.hasOwnProperty.call(option.defaults, key)) {
                 throw new Error(
-                    `The flag '${key}' is not valid for ${
-                        option.name
-                    }, expected one of: ${Object.keys(option.defaults).join(
-                        ", "
-                    )}`
+                    i18n.flag_0_is_not_valid_for_1_expected_2(
+                        key,
+                        option.name,
+                        Object.keys(option.defaults).join(", "),
+                    ),
                 );
             }
 
@@ -493,7 +732,7 @@ const converters: {
                     obj[key] = option.defaults[key];
                 } else {
                     throw new Error(
-                        `Flag values for ${option.name} must be a boolean.`
+                        i18n.flag_values_for_0_must_be_booleans(option.name),
                     );
                 }
             }
@@ -513,22 +752,32 @@ const converters: {
 export function convert(
     value: unknown,
     option: DeclarationOption,
-    configPath: string
+    i18n: TranslationProxy,
+    configPath: string,
+    oldValue?: unknown,
 ): unknown {
     const _converters = converters as Record<
         ParameterType,
-        (v: unknown, o: DeclarationOption, c: string) => unknown
+        (
+            v: unknown,
+            o: DeclarationOption,
+            i18n: TranslationProxy,
+            c: string,
+            ov: unknown,
+        ) => unknown
     >;
     return _converters[option.type ?? ParameterType.String](
         value,
         option,
-        configPath
+        i18n,
+        configPath,
+        oldValue,
     );
 }
 
 const defaultGetters: {
     [K in ParameterType]: (
-        option: DeclarationOption & { type: K }
+        option: DeclarationOption & { type: K },
     ) => ParameterTypeToOptionTypeMap[K];
 } = {
     [ParameterType.String](option) {
@@ -555,20 +804,23 @@ const defaultGetters: {
     [ParameterType.Mixed](option) {
         return option.defaultValue;
     },
+    [ParameterType.Object](option) {
+        return option.defaultValue;
+    },
     [ParameterType.Array](option) {
-        return option.defaultValue ?? [];
+        return option.defaultValue?.slice() ?? [];
     },
     [ParameterType.PathArray](option) {
         return (
             option.defaultValue?.map((value) =>
-                resolve(process.cwd(), value)
+                resolve(process.cwd(), value),
             ) ?? []
         );
     },
     [ParameterType.ModuleArray](option) {
         return (
             option.defaultValue?.map((value) =>
-                value.startsWith(".") ? resolve(process.cwd(), value) : value
+                value.startsWith(".") ? resolve(process.cwd(), value) : value,
             ) ?? []
         );
     },
@@ -591,7 +843,7 @@ export function getDefaultValue(option: DeclarationOption) {
 function resolveGlobPaths(globs: readonly string[], configPath: string) {
     return globs.map((path) => {
         const start = path.match(/^[!#]+/)?.[0] ?? "";
-        const remaining = path.substr(start.length);
+        const remaining = path.substring(start.length);
         if (!remaining.startsWith("**")) {
             return start + resolve(configPath, remaining);
         }
@@ -620,8 +872,9 @@ function isTsNumericEnum(map: Record<string, any>) {
  */
 function getMapError(
     map: MapDeclarationOption<unknown>["map"],
-    name: string
-): string {
+    i18n: TranslationProxy,
+    name: string,
+): TranslatedString {
     let keys = map instanceof Map ? [...map.keys()] : Object.keys(map);
 
     // If the map is a TS numeric enum we need to filter out the numeric keys.
@@ -631,7 +884,7 @@ function getMapError(
         keys = keys.filter((key) => Number.isNaN(parseInt(key, 10)));
     }
 
-    return `${name} must be one of ${keys.join(", ")}`;
+    return i18n.option_0_must_be_one_of_1(name, keys.join(", "));
 }
 
 /**
@@ -643,15 +896,26 @@ function getMapError(
  */
 function getBoundsError(
     name: string,
+    i18n: TranslationProxy,
     minValue?: number,
-    maxValue?: number
-): string {
+    maxValue?: number,
+): TranslatedString {
     if (isFiniteNumber(minValue) && isFiniteNumber(maxValue)) {
-        return `${name} must be between ${minValue} and ${maxValue}`;
+        return i18n.option_0_must_be_between_1_and_2(
+            name,
+            String(minValue),
+            String(maxValue),
+        );
     } else if (isFiniteNumber(minValue)) {
-        return `${name} must be >= ${minValue}`;
+        return i18n.option_0_must_be_equal_to_or_greater_than_1(
+            name,
+            String(minValue),
+        );
     } else {
-        return `${name} must be <= ${maxValue}`;
+        return i18n.option_0_must_be_less_than_or_equal_to_1(
+            name,
+            String(maxValue),
+        );
     }
 }
 
@@ -674,7 +938,7 @@ function isFiniteNumber(value: unknown): value is number {
 function valueIsWithinBounds(
     value: number,
     minValue?: number,
-    maxValue?: number
+    maxValue?: number,
 ): boolean {
     if (isFiniteNumber(minValue) && isFiniteNumber(maxValue)) {
         return minValue <= value && value <= maxValue;

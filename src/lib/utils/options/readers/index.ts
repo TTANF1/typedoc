@@ -1,3 +1,4 @@
-export { ArgumentsReader } from "./arguments";
-export { TSConfigReader } from "./tsconfig";
-export { TypeDocReader } from "./typedoc";
+export { ArgumentsReader } from "./arguments.js";
+export { PackageJsonReader } from "./package-json.js";
+export { TSConfigReader } from "./tsconfig.js";
+export { TypeDocReader } from "./typedoc.js";

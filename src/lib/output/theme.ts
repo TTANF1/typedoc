@@ -1,10 +1,10 @@
-import type { Renderer } from "./renderer";
-import type { ProjectReflection } from "../models/reflections/project";
-import type { UrlMapping } from "./models/UrlMapping";
-import { RendererComponent } from "./components";
-import { Component } from "../utils/component";
-import type { PageEvent } from "./events";
-import type { Reflection } from "../models";
+import type { Renderer } from "./renderer.js";
+import type { ProjectReflection } from "../models/reflections/project.js";
+import type { RenderTemplate, UrlMapping } from "./models/UrlMapping.js";
+import { RendererComponent } from "./components.js";
+import type { PageEvent } from "./events.js";
+import type { Reflection } from "../models/index.js";
+import type { Slugger } from "./themes/default/Slugger.js";
 
 /**
  * Base class of all themes.
@@ -14,16 +14,8 @@ import type { Reflection } from "../models";
  * and templates to use. Additionally themes can subscribe to the events emitted by
  * {@link Renderer} to control and manipulate the output process.
  */
-@Component({ name: "theme", internal: true })
 export abstract class Theme extends RendererComponent {
-    /**
-     * Create a new BaseTheme instance.
-     *
-     * @param renderer  The renderer this theme is attached to.
-     */
-    constructor(renderer: Renderer) {
-        super(renderer);
-    }
+    private sluggers = new Map<Reflection, Slugger>();
 
     /**
      * Map the models of the given project to the desired output files.
@@ -41,10 +33,25 @@ export abstract class Theme extends RendererComponent {
      * @returns A list of {@link UrlMapping} instances defining which models
      * should be rendered to which files.
      */
-    abstract getUrls(project: ProjectReflection): UrlMapping[];
+    abstract getUrls(project: ProjectReflection): UrlMapping<Reflection>[];
 
     /**
      * Renders the provided page to a string, which will be written to disk by the {@link Renderer}
      */
-    abstract render(page: PageEvent<Reflection>): string;
+    abstract render(
+        page: PageEvent<Reflection>,
+        template: RenderTemplate<PageEvent<Reflection>>,
+    ): string;
+
+    setSlugger(reflection: Reflection, slugger: Slugger) {
+        this.sluggers.set(reflection, slugger);
+    }
+
+    getSlugger(reflection: Reflection): Slugger {
+        if (this.sluggers.has(reflection)) {
+            return this.sluggers.get(reflection)!;
+        }
+        // A slugger should always be defined at least for the project
+        return this.getSlugger(reflection.parent!);
+    }
 }

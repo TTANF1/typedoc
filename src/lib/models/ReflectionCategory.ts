@@ -1,4 +1,14 @@
-import type { DeclarationReflection } from ".";
+import { Comment } from "./comments/index.js";
+import type {
+    CommentDisplayPart,
+    DeclarationReflection,
+    DocumentReflection,
+} from "./index.js";
+import type {
+    Serializer,
+    JSONOutput,
+    Deserializer,
+} from "../serialization/index.js";
 
 /**
  * A category of reflections.
@@ -14,9 +24,14 @@ export class ReflectionCategory {
     title: string;
 
     /**
+     * The user specified description, if any, set with `@categoryDescription`
+     */
+    description?: CommentDisplayPart[];
+
+    /**
      * All reflections of this category.
      */
-    children: DeclarationReflection[] = [];
+    children: Array<DeclarationReflection | DocumentReflection> = [];
 
     /**
      * Create a new ReflectionCategory instance.
@@ -32,5 +47,40 @@ export class ReflectionCategory {
      */
     allChildrenHaveOwnDocument(): boolean {
         return this.children.every((child) => child.hasOwnDocument);
+    }
+
+    toObject(serializer: Serializer): JSONOutput.ReflectionCategory {
+        return {
+            title: this.title,
+            description: this.description
+                ? Comment.serializeDisplayParts(serializer, this.description)
+                : undefined,
+            children:
+                this.children.length > 0
+                    ? this.children.map((child) => child.id)
+                    : undefined,
+        };
+    }
+
+    fromObject(de: Deserializer, obj: JSONOutput.ReflectionCategory) {
+        if (obj.description) {
+            this.description = Comment.deserializeDisplayParts(
+                de,
+                obj.description,
+            );
+        }
+
+        if (obj.children) {
+            de.defer((project) => {
+                for (const childId of obj.children || []) {
+                    const child = project.getReflectionById(
+                        de.oldIdToNewId[childId] ?? -1,
+                    );
+                    if (child?.isDeclaration() || child?.isDocument()) {
+                        this.children.push(child);
+                    }
+                }
+            });
+        }
     }
 }

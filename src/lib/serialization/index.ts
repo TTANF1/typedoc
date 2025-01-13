@@ -1,37 +1,9 @@
+export type { SerializerComponent } from "./components.js";
 export {
-    ReflectionSerializerComponent,
-    SerializerComponent,
-    TypeSerializerComponent,
-} from "./components";
-export { SerializeEvent } from "./events";
-export type { SerializeEventData } from "./events";
-export { Serializer } from "./serializer";
-export {
-    ArrayTypeSerializer,
-    CommentSerializer,
-    CommentTagSerializer,
-    ContainerReflectionSerializer,
-    DeclarationReflectionSerializer,
-    DecoratorContainerSerializer,
-    DecoratorWrapper,
-    IntersectionTypeSerializer,
-    IntrinsicTypeSerializer,
-    LiteralTypeSerializer,
-    ParameterReflectionSerializer,
-    ReferenceTypeSerializer,
-    ReflectionCategorySerializer,
-    ReflectionGroupSerializer,
-    ReflectionSerializer,
-    ReflectionTypeSerializer,
-    SignatureReflectionSerializer,
-    SourceReferenceContainerSerializer,
-    SourceReferenceWrapper,
-    TupleTypeSerializer,
-    TypeOperatorTypeSerializer,
-    TypeParameterReflectionSerializer,
-    TypeSerializer,
-    UnknownTypeSerializer,
-} from "./serializers";
-export { JSONOutput };
-
-import * as JSONOutput from "./schema";
+    Deserializer,
+    type Deserializable,
+    type DeserializerComponent,
+} from "./deserializer.js";
+export { SerializeEvent } from "./events.js";
+export * as JSONOutput from "./schema.js";
+export { Serializer, type SerializerEvents } from "./serializer.js";

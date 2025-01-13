@@ -3,8 +3,9 @@ import {
     binaryFindPartition,
     insertOrderSorted,
     insertPrioritySorted,
+    maxElementByScore,
     removeIfPresent,
-} from "../../lib/utils/array";
+} from "../../lib/utils/array.js";
 
 describe("Array utils", () => {
     describe("insertPrioritySorted", () => {
@@ -18,28 +19,28 @@ describe("Array utils", () => {
         });
 
         it("inserts at the start", () => {
-            equal(insertPrioritySorted([item2], item1), [item1, item2]);
+            equal(insertPrioritySorted([item1], item2), [item2, item1]);
         });
 
         it("inserts in the middle", () => {
-            equal(insertPrioritySorted([item1, item3], item2), [
-                item1,
-                item2,
+            equal(insertPrioritySorted([item3, item1], item2), [
                 item3,
+                item2,
+                item1,
             ]);
         });
 
         it("inserts at the end", () => {
-            equal(insertPrioritySorted([item2, item3], item4), [
-                item2,
-                item3,
+            equal(insertPrioritySorted([item4, item3], item2), [
                 item4,
+                item3,
+                item2,
             ]);
         });
 
-        it("inserts new items first", () => {
-            const item0 = { priority: 1, first: true };
-            equal(insertPrioritySorted([item1], item0), [item0, item1]);
+        it("inserts new items last", () => {
+            const item0 = { priority: 1, first: false };
+            equal(insertPrioritySorted([item1], item0), [item1, item0]);
         });
     });
 
@@ -93,18 +94,18 @@ describe("Array utils", () => {
         it("works with more items", () => {
             equal(
                 binaryFindPartition([1, 2, 3], (n) => n > 2),
-                2
+                2,
             );
             equal(
                 binaryFindPartition([1, 2, 3, 4, 5, 6, 7], (n) => n > 5),
-                5
+                5,
             );
         });
 
         it("works with no partition", () => {
             equal(
                 binaryFindPartition([1, 2, 3], () => false),
-                -1
+                -1,
             );
         });
 
@@ -116,7 +117,7 @@ describe("Array utils", () => {
 
             equal(
                 binaryFindPartition(arr, (v) => v === 1),
-                index
+                index,
             );
         });
     });
@@ -136,6 +137,26 @@ describe("Array utils", () => {
             const arr = [1, 2, 1];
             removeIfPresent(arr, 1);
             equal(arr, [2, 1]);
+        });
+    });
+
+    describe("maxElementByScore", () => {
+        it("Gets the max element", () => {
+            const arr = [1, 2, 3];
+            const item = maxElementByScore(arr, (x) => x);
+            equal(item, 3);
+        });
+
+        it("Prioritizes elements earlier in the array", () => {
+            const arr = [1, 2, 3];
+            const item = maxElementByScore(arr, () => 1);
+            equal(item, 1);
+        });
+
+        it("Returns undefined for an empty array", () => {
+            const arr: unknown[] = [];
+            const item = maxElementByScore(arr, () => 1);
+            equal(item, undefined);
         });
     });
 });

@@ -13,17 +13,17 @@ export function exportedFunction(): void {}
  * @param paramA
  *   This is a **parameter** pointing to an interface.
  *
- *   ~~~
+ *   ```
  *   const value:BaseClass = new BaseClass('test');
  *   functionWithArguments('arg', 0, value);
- *   ~~~
+ *   ```
  *
  * @returns This is the return value of the function.
  */
 export function functionWithParameters(
     paramZ: string,
     paramG: any,
-    paramA: Object
+    paramA: Object,
 ): number {
     return 0;
 }
@@ -46,7 +46,7 @@ export const variableFunction = function (someParam: number): number {
  */
 export function functionWithOptionalValue(
     requiredParam: string,
-    optionalParam?: string
+    optionalParam?: string,
 ) {}
 
 /**
@@ -64,7 +64,7 @@ export function functionWithDefaults(
     valueB: number = 100,
     valueC: number = Number.NaN,
     valueD: boolean = true,
-    valueE: boolean = null!
+    valueE: boolean = null!,
 ): string {
     return valueA;
 }
@@ -77,102 +77,6 @@ export function functionWithDefaults(
  */
 export function functionWithRest(...rest: string[]): string {
     return rest.join(", ");
-}
-
-/**
- * This is a function with a destructured parameter.
- *
- * @param destructuredParam - This is the parameter that is destructured.
- * @param destructuredParam.paramZ - This is a string parameter.
- * @param destructuredParam.paramG - This is a parameter flagged with any.
- *     This sentence is placed in the next line.
- *
- * @param destructuredParam.paramA
- *   This is a **parameter** pointing to an interface.
- *
- *   ~~~
- *   const value:BaseClass = new BaseClass('test');
- *   functionWithArguments('arg', 0, value);
- *   ~~~
- *
- * @returns This is the return value of the function.
- */
-export function functionWithADestructuredParameter({
-    paramZ,
-    paramG,
-    paramA,
-}: {
-    paramZ: string;
-    paramG: any;
-    paramA: Object;
-}): number {
-    return 0;
-}
-
-/**
- * This is a function with a destructured parameter and additional undocumented parameters.
- * The `@param` directives are ignored because we cannot be certain which parameter they refer to.
- *
- * @param destructuredParam - This is the parameter that is destructured.
- * @param destructuredParam.paramZ - This is a string parameter.
- * @param destructuredParam.paramG - This is a parameter flagged with any.
- *     This sentence is placed in the next line.
- *
- * @param destructuredParam.paramA
- *   This is a **parameter** pointing to an interface.
- *
- *   ~~~
- *   const value:BaseClass = new BaseClass('test');
- *   functionWithArguments('arg', 0, value);
- *   ~~~
- *
- * @returns This is the return value of the function.
- */
-export function functionWithADestructuredParameterAndExtraParameters(
-    {
-        paramZ,
-        paramG,
-        paramA,
-    }: {
-        paramZ: string;
-        paramG: any;
-        paramA: Object;
-    },
-    extraParameter: string
-): number {
-    return 0;
-}
-
-/**
- * This is a function with a destructured parameter and an extra `@param` directive with no corresponding parameter.
- * The `@param` directives are ignored because we cannot be certain which corresponds to the real parameter.
- *
- * @param fakeParameter - This directive does not have a corresponding parameter.
- * @param destructuredParam - This is the parameter that is destructured.
- * @param destructuredParam.paramZ - This is a string parameter.
- * @param destructuredParam.paramG - This is a parameter flagged with any.
- *     This sentence is placed in the next line.
- *
- * @param destructuredParam.paramA
- *   This is a **parameter** pointing to an interface.
- *
- *   ~~~
- *   const value:BaseClass = new BaseClass('test');
- *   functionWithArguments('arg', 0, value);
- *   ~~~
- *
- * @returns This is the return value of the function.
- */
-export function functionWithADestructuredParameterAndAnExtraParamDirective({
-    paramZ,
-    paramG,
-    paramA,
-}: {
-    paramZ: string;
-    paramG: any;
-    paramA: Object;
-}): number {
-    return 0;
 }
 
 /**
@@ -191,12 +95,12 @@ export function multipleSignatures(value: string): string;
 export function multipleSignatures(value: { name: string }): string;
 
 /**
- * This is the actual implementation, this comment will not be visible
- * in the generated documentation. The `@inheritdoc` tag can not be used
- * to pull content from this signature into documentation for the real
- * signatures.
- *
- * @return This is the return value of the function.
+ * This comment is on the actual implementation of the function.
+ * TypeDoc used to allow this for providing "default" comments that would be
+ * copied to each signature. It no longer does this, and instead treats
+ * this comment as belonging to the function reflection itself.
+ * Any `@param` or `@returns` tags within this comment won't be applied
+ * to signatures.
  */
 export function multipleSignatures(): string {
     if (arguments.length > 0) {
@@ -239,7 +143,7 @@ export function checkerFunction(anything: any): anything is string {
  * @param arg
  */
 export function assertIsNonNull<T>(
-    arg: T | null | undefined
+    arg: T | null | undefined,
 ): asserts arg is T {
     if (arg == null) {
         throw new Error("Was nullable");

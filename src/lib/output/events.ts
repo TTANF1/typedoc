@@ -1,9 +1,13 @@
 import * as Path from "path";
 
-import { Event } from "../utils/events";
-import type { ProjectReflection } from "../models/reflections/project";
-import type { RenderTemplate, UrlMapping } from "./models/UrlMapping";
-import type { LegendItem } from "./plugins/LegendPlugin";
+import type { ProjectReflection } from "../models/reflections/project.js";
+import type { RenderTemplate, UrlMapping } from "./models/UrlMapping.js";
+import type {
+    DeclarationReflection,
+    DocumentReflection,
+    Reflection,
+    ReflectionKind,
+} from "../models/index.js";
 
 /**
  * An event emitted by the {@link Renderer} class at the very beginning and
@@ -12,7 +16,7 @@ import type { LegendItem } from "./plugins/LegendPlugin";
  * @see {@link Renderer.EVENT_BEGIN}
  * @see {@link Renderer.EVENT_END}
  */
-export class RendererEvent extends Event {
+export class RendererEvent {
     /**
      * The project the renderer is currently processing.
      */
@@ -28,7 +32,7 @@ export class RendererEvent extends Event {
      *
      * This list can be altered during the {@link Renderer.EVENT_BEGIN} event.
      */
-    urls?: UrlMapping[];
+    urls?: UrlMapping<Reflection>[];
 
     /**
      * Triggered before the renderer starts rendering a project.
@@ -42,12 +46,7 @@ export class RendererEvent extends Event {
      */
     static readonly END = "endRender";
 
-    constructor(
-        name: string,
-        outputDirectory: string,
-        project: ProjectReflection
-    ) {
-        super(name);
+    constructor(outputDirectory: string, project: ProjectReflection) {
         this.outputDirectory = outputDirectory;
         this.project = project;
     }
@@ -60,16 +59,22 @@ export class RendererEvent extends Event {
      * @returns A newly created {@link PageEvent} instance.
      */
     public createPageEvent<Model>(
-        mapping: UrlMapping<Model>
-    ): PageEvent<Model> {
-        const event = new PageEvent<Model>(PageEvent.BEGIN);
+        mapping: UrlMapping<Model>,
+    ): [RenderTemplate<PageEvent<Model>>, PageEvent<Model>] {
+        const event = new PageEvent<Model>(mapping.model);
         event.project = this.project;
         event.url = mapping.url;
-        event.model = mapping.model;
-        event.template = mapping.template;
         event.filename = Path.join(this.outputDirectory, mapping.url);
-        return event;
+        return [mapping.template, event];
     }
+}
+
+export interface PageHeading {
+    link: string;
+    text: string;
+    level?: number;
+    kind?: ReflectionKind;
+    classes?: string;
 }
 
 /**
@@ -79,7 +84,7 @@ export class RendererEvent extends Event {
  * @see {@link Renderer.EVENT_BEGIN_PAGE}
  * @see {@link Renderer.EVENT_END_PAGE}
  */
-export class PageEvent<Model = unknown> extends Event {
+export class PageEvent<out Model = unknown> {
     /**
      * The project the renderer is currently processing.
      */
@@ -98,18 +103,7 @@ export class PageEvent<Model = unknown> extends Event {
     /**
      * The model that should be rendered on this page.
      */
-    model!: Model;
-
-    /**
-     * The template that should be used to render this page.
-     */
-    template!: RenderTemplate<this>;
-
-    /**
-     * The legend items that are applicable for this page
-     * @internal this is going away. The footer will do the logic itself.
-     */
-    legend?: LegendItem[][];
+    readonly model: Model;
 
     /**
      * The final html content of this page.
@@ -117,6 +111,34 @@ export class PageEvent<Model = unknown> extends Event {
      * Should be rendered by layout templates and can be modified by plugins.
      */
     contents?: string;
+
+    /**
+     * Links to content within this page that should be rendered in the page navigation.
+     * This is built when rendering the document content.
+     */
+    pageHeadings: PageHeading[] = [];
+
+    /**
+     * Sections of the page, generally set by `@group`s
+     */
+    pageSections = [
+        {
+            title: "",
+            headings: this.pageHeadings,
+        },
+    ];
+
+    /**
+     * Start a new section of the page. Sections are collapsible within
+     * the "On This Page" sidebar.
+     */
+    startNewSection(title: string) {
+        this.pageHeadings = [];
+        this.pageSections.push({
+            title,
+            headings: this.pageHeadings,
+        });
+    }
 
     /**
      * Triggered before a document will be rendered.
@@ -129,15 +151,25 @@ export class PageEvent<Model = unknown> extends Event {
      * @event
      */
     static readonly END = "endPage";
+
+    constructor(model: Model);
+    /** @deprecated use the single constructor arg instead, will be removed in 0.27 */
+    constructor(name: string, model: Model);
+    constructor(nameOrModel: string | Model, model?: Model) {
+        if (typeof nameOrModel === "string") {
+            this.model = model!;
+        } else {
+            this.model = nameOrModel;
+        }
+    }
 }
 
 /**
- * An event emitted by the {@link MarkedPlugin} on the {@link Renderer} after a chunk of
- * markdown has been processed. Allows other plugins to manipulate the result.
+ * An event emitted when markdown is being parsed. Allows other plugins to manipulate the result.
  *
- * @see {@link MarkedPlugin.EVENT_PARSE_MARKDOWN}
+ * @see {@link MarkdownEvent.PARSE}
  */
-export class MarkdownEvent extends Event {
+export class MarkdownEvent {
     /**
      * The unparsed original text.
      */
@@ -149,14 +181,82 @@ export class MarkdownEvent extends Event {
     parsedText: string;
 
     /**
+     * The page that this markdown is being parsed for.
+     */
+    readonly page: PageEvent;
+
+    /**
      * Triggered on the renderer when this plugin parses a markdown string.
      * @event
      */
     static readonly PARSE = "parseMarkdown";
 
-    constructor(name: string, originalText: string, parsedText: string) {
-        super(name);
+    constructor(page: PageEvent, originalText: string, parsedText: string) {
+        this.page = page;
         this.originalText = originalText;
         this.parsedText = parsedText;
+    }
+}
+
+/**
+ * An event emitted when the search index is being prepared.
+ */
+export class IndexEvent {
+    /**
+     * Triggered on the renderer when the search index is being prepared.
+     * @event
+     */
+    static readonly PREPARE_INDEX = "prepareIndex";
+
+    /**
+     * May be filtered by plugins to reduce the results available.
+     * Additional items *should not* be added to this array.
+     *
+     * If you remove an index from this array, you must also remove the
+     * same index from {@link searchFields}. The {@link removeResult} helper
+     * will do this for you.
+     */
+    searchResults: Array<DeclarationReflection | DocumentReflection>;
+
+    /**
+     * Additional search fields to be used when creating the search index.
+     * `name`, `comment` and `document` may be specified to overwrite TypeDoc's search fields.
+     *
+     * Do not use `id` as a custom search field.
+     */
+    searchFields: Record<string, string>[];
+
+    /**
+     * Weights for the fields defined in `searchFields`. The default will weight
+     * `name` as 10x more important than comment and document content.
+     *
+     * If a field added to {@link searchFields} is not added to this object, it
+     * will **not** be searchable.
+     *
+     * Do not replace this object, instead, set new properties on it for custom search
+     * fields added by your plugin.
+     */
+    readonly searchFieldWeights: Record<string, number> = {
+        name: 10,
+        comment: 1,
+        document: 1,
+    };
+
+    /**
+     * Remove a search result by index.
+     */
+    removeResult(index: number) {
+        this.searchResults.splice(index, 1);
+        this.searchFields.splice(index, 1);
+    }
+
+    constructor(
+        searchResults: Array<DeclarationReflection | DocumentReflection>,
+    ) {
+        this.searchResults = searchResults;
+        this.searchFields = Array.from(
+            { length: this.searchResults.length },
+            () => ({}),
+        );
     }
 }

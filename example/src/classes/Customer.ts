@@ -2,6 +2,8 @@
  * An abstract base class for the customer entity in our application.
  *
  * Notice how TypeDoc shows the inheritance hierarchy for our class.
+ *
+ * @category Model
  */
 export abstract class Customer {
     /** A public readonly property. */
@@ -76,7 +78,9 @@ export abstract class Customer {
 }
 
 /**
- * A class that extends [[`Customer`]].
+ * A class that extends {@link Customer | `Customer`}.
+ *
+ * Notice how TypeDoc shows the inheritance hierarchy for our class.
  */
 export class DeliveryCustomer extends Customer {
     /** A property defined on the subclass. */
@@ -97,7 +101,7 @@ export class DeliveryCustomer extends Customer {
         id: number,
         name: string,
         nextOrderNumber: string | number,
-        subscriptionType: "basic" | "enterprise"
+        subscriptionType: "basic" | "enterprise",
     ) {
         super(id, name, nextOrderNumber);
         this.subscriptionType = subscriptionType;
@@ -114,5 +118,33 @@ export class DeliveryCustomer extends Customer {
         if (this.subscriptionType === "enterprise") return true;
 
         return typeof this.preferredCourierId === "undefined";
+    }
+}
+
+/**
+ * A class that extends {@link Customer | `Customer`}.
+ *
+ * Notice how TypeDoc shows the inheritance hierarchy for our class.
+ */
+export class WalkInCustomer extends Customer {
+    /** A property defined on the subclass. */
+    trustedCustomer?: boolean;
+
+    /** A private property defined on the subclass. */
+    private _ordersPlacedCount: number = 0;
+
+    /**
+     * An example of overriding a public method.
+     */
+    onOrderPlaced(): void {
+        super.onOrderPlaced();
+
+        this._ordersPlacedCount++;
+
+        if (
+            this._ordersPlacedCount > 10 &&
+            typeof this.trustedCustomer === "undefined"
+        )
+            this.trustedCustomer = true;
     }
 }

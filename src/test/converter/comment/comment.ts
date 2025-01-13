@@ -25,10 +25,11 @@ import "./comment2";
  * }
  * ```
  * @deprecated
- * @todo something
  *
- * @class will be removed
  * @type {Data<object>} will also be removed
+ *
+ * @groupDescription Methods
+ * Methods description!
  */
 export class CommentedClass {
     /**
@@ -82,3 +83,13 @@ export class CommentedClass {
      */
     ignoredprop: string;
 }
+
+export type UnionWithCommentsOnMembers =
+    /**
+     * Doc of foo1.
+     */
+    | "foo1"
+    /**
+     * Doc of foo2.
+     */
+    | "foo2";

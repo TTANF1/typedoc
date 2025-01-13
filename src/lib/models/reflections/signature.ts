@@ -1,36 +1,55 @@
-import { Type, ReflectionType, ReferenceType } from "../types";
-import { Reflection, TraverseProperty, TraverseCallback } from "./abstract";
-import type { ParameterReflection } from "./parameter";
-import type { TypeParameterReflection } from "./type-parameter";
-import type { DeclarationReflection } from "./declaration";
-import type { ReflectionKind } from "./kind";
+import { type SomeType, ReflectionType, type ReferenceType } from "../types.js";
+import {
+    Reflection,
+    TraverseProperty,
+    type TraverseCallback,
+} from "./abstract.js";
+import type { ParameterReflection } from "./parameter.js";
+import type { TypeParameterReflection } from "./type-parameter.js";
+import type { DeclarationReflection } from "./declaration.js";
+import type { ReflectionKind } from "./kind.js";
+import type {
+    Serializer,
+    JSONOutput,
+    Deserializer,
+} from "../../serialization/index.js";
+import { SourceReference } from "../sources/file.js";
 
+/**
+ * @category Reflections
+ */
 export class SignatureReflection extends Reflection {
-    /**
-     * Create a new SignatureReflection to contain a specific type of signature.
-     */
+    readonly variant = "signature";
+
+    // ESLint is wrong, we're restricting types to be more narrow.
+    // eslint-disable-next-line @typescript-eslint/no-useless-constructor
     constructor(
         name: string,
         kind: SignatureReflection["kind"],
-        parent: DeclarationReflection
+        parent: DeclarationReflection,
     ) {
         super(name, kind, parent);
     }
 
-    override kind!:
+    declare kind:
         | ReflectionKind.SetSignature
         | ReflectionKind.GetSignature
         | ReflectionKind.IndexSignature
         | ReflectionKind.CallSignature
         | ReflectionKind.ConstructorSignature;
 
-    override parent!: DeclarationReflection;
+    declare parent: DeclarationReflection;
+
+    /**
+     * A list of all source files that contributed to this reflection.
+     */
+    sources?: SourceReference[];
 
     parameters?: ParameterReflection[];
 
     typeParameters?: TypeParameterReflection[];
 
-    type?: Type;
+    type?: SomeType;
 
     /**
      * A type that points to the reflection that has been overwritten by this reflection.
@@ -53,39 +72,29 @@ export class SignatureReflection extends Reflection {
      */
     implementationOf?: ReferenceType;
 
-    /**
-     * Traverse all potential child reflections of this reflection.
-     *
-     * The given callback will be invoked for all children, signatures and type parameters
-     * attached to this reflection.
-     *
-     * @param callback  The callback function that should be applied for each child reflection.
-     */
     override traverse(callback: TraverseCallback) {
         if (this.type instanceof ReflectionType) {
             if (
                 callback(
                     this.type.declaration,
-                    TraverseProperty.TypeLiteral
+                    TraverseProperty.TypeLiteral,
                 ) === false
             ) {
                 return;
             }
         }
 
-        for (const parameter of this.typeParameters ?? []) {
+        for (const parameter of this.typeParameters?.slice() || []) {
             if (callback(parameter, TraverseProperty.TypeParameter) === false) {
                 return;
             }
         }
 
-        for (const parameter of this.parameters ?? []) {
+        for (const parameter of this.parameters?.slice() || []) {
             if (callback(parameter, TraverseProperty.Parameters) === false) {
                 return;
             }
         }
-
-        super.traverse(callback);
     }
 
     /**
@@ -95,17 +104,60 @@ export class SignatureReflection extends Reflection {
         let result = super.toString();
 
         if (this.typeParameters) {
-            const parameters: string[] = [];
-            this.typeParameters.forEach((parameter) =>
-                parameters.push(parameter.name)
+            const parameters: string[] = this.typeParameters.map(
+                (parameter) => parameter.name,
             );
             result += "<" + parameters.join(", ") + ">";
         }
 
         if (this.type) {
-            result += ":" + this.type.toString();
+            result += ": " + this.type.toString();
         }
 
         return result;
+    }
+
+    override toObject(serializer: Serializer): JSONOutput.SignatureReflection {
+        return {
+            ...super.toObject(serializer),
+            variant: this.variant,
+            sources: serializer.toObjectsOptional(this.sources),
+            typeParameters: serializer.toObjectsOptional(this.typeParameters),
+            parameters: serializer.toObjectsOptional(this.parameters),
+            type: serializer.toObject(this.type),
+            overwrites: serializer.toObject(this.overwrites),
+            inheritedFrom: serializer.toObject(this.inheritedFrom),
+            implementationOf: serializer.toObject(this.implementationOf),
+        };
+    }
+
+    override fromObject(
+        de: Deserializer,
+        obj: JSONOutput.SignatureReflection,
+    ): void {
+        super.fromObject(de, obj);
+
+        this.sources = de.reviveMany(
+            obj.sources,
+            (t) => new SourceReference(t.fileName, t.line, t.character),
+        );
+        // eslint-disable-next-line @typescript-eslint/no-deprecated
+        if (obj.typeParameter) {
+            // eslint-disable-next-line @typescript-eslint/no-deprecated
+            this.typeParameters = de.reviveMany(obj.typeParameter, (t) =>
+                de.constructReflection(t),
+            );
+        } else {
+            this.typeParameters = de.reviveMany(obj.typeParameters, (t) =>
+                de.constructReflection(t),
+            );
+        }
+        this.parameters = de.reviveMany(obj.parameters, (t) =>
+            de.constructReflection(t),
+        );
+        this.type = de.reviveType(obj.type);
+        this.overwrites = de.reviveType(obj.overwrites);
+        this.inheritedFrom = de.reviveType(obj.inheritedFrom);
+        this.implementationOf = de.reviveType(obj.implementationOf);
     }
 }

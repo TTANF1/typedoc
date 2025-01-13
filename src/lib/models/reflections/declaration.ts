@@ -1,10 +1,18 @@
-import type * as ts from "typescript";
-import type { SomeType } from "..";
-import { ReferenceType, ReflectionType, Type } from "../types";
-import { TraverseCallback, TraverseProperty } from "./abstract";
-import { ContainerReflection } from "./container";
-import type { SignatureReflection } from "./signature";
-import type { TypeParameterReflection } from "./type-parameter";
+import type ts from "typescript";
+import { type ReferenceType, ReflectionType, type SomeType } from "../types.js";
+import { type TraverseCallback, TraverseProperty } from "./abstract.js";
+import { ContainerReflection } from "./container.js";
+import type { SignatureReflection } from "./signature.js";
+import type { TypeParameterReflection } from "./type-parameter.js";
+import type {
+    Serializer,
+    JSONOutput,
+    Deserializer,
+} from "../../serialization/index.js";
+import { Comment, type CommentDisplayPart } from "../comments/index.js";
+import { SourceReference } from "../sources/file.js";
+import { ReflectionSymbolId } from "./ReflectionSymbolId.js";
+import { ReflectionKind } from "./kind.js";
 
 /**
  * Stores hierarchical type data.
@@ -15,7 +23,7 @@ export interface DeclarationHierarchy {
     /**
      * The types represented by this node in the hierarchy.
      */
-    types: Type[];
+    types: SomeType[];
 
     /**
      * The next hierarchy level.
@@ -33,11 +41,29 @@ export interface DeclarationHierarchy {
  *
  * All parts of a project are represented by DeclarationReflection instances. The actual
  * kind of a reflection is stored in its ´kind´ member.
+ * @category Reflections
  */
 export class DeclarationReflection extends ContainerReflection {
+    readonly variant = "declaration" as "declaration" | "reference";
+
+    /**
+     * A list of all source files that contributed to this reflection.
+     */
+    sources?: SourceReference[];
+
+    /**
+     * Precomputed boost for search results, may be less than 1 to de-emphasize this member in search results.
+     * Does NOT include group/category values as they are computed when building the JS index.
+     *
+     * This is preserved for plugins, and may be removed in 0.28 if no plugins have used it yet.
+     */
+    relevanceBoost?: number;
+
     /**
      * The escaped name of this declaration assigned by the TS compiler if there is an associated symbol.
      * This is used to retrieve properties for analyzing inherited members.
+     *
+     * Not serialized, only useful during conversion.
      * @internal
      */
     escapedName?: ts.__String;
@@ -63,7 +89,7 @@ export class DeclarationReflection extends ContainerReflection {
     /**
      * The index signature of this declaration.
      */
-    indexSignature?: SignatureReflection;
+    indexSignatures?: SignatureReflection[];
 
     /**
      * The get signature of this declaration.
@@ -78,7 +104,7 @@ export class DeclarationReflection extends ContainerReflection {
     /**
      * The default value of this reflection.
      *
-     * Applies to function parameters.
+     * Applies to function parameters, variables, and properties.
      */
     defaultValue?: string;
 
@@ -106,7 +132,7 @@ export class DeclarationReflection extends ContainerReflection {
     /**
      * A list of all types this reflection extends (e.g. the parent classes).
      */
-    extendedTypes?: Type[];
+    extendedTypes?: SomeType[];
 
     /**
      * A list of all types that extend this reflection (e.g. the subclasses).
@@ -116,7 +142,7 @@ export class DeclarationReflection extends ContainerReflection {
     /**
      * A list of all types this reflection implements.
      */
-    implementedTypes?: Type[];
+    implementedTypes?: SomeType[];
 
     /**
      * A list of all types that implement this reflection.
@@ -129,6 +155,20 @@ export class DeclarationReflection extends ContainerReflection {
      */
     typeHierarchy?: DeclarationHierarchy;
 
+    /**
+     * The contents of the readme file of the module when found.
+     */
+    readme?: CommentDisplayPart[];
+
+    /**
+     * The version of the module when found.
+     */
+    packageVersion?: string;
+
+    override isDeclaration(): this is DeclarationReflection {
+        return true;
+    }
+
     override hasGetterOrSetter(): boolean {
         return !!this.getSignature || !!this.setSignature;
     }
@@ -139,8 +179,8 @@ export class DeclarationReflection extends ContainerReflection {
         if (this.signatures) {
             result = result.concat(this.signatures);
         }
-        if (this.indexSignature) {
-            result.push(this.indexSignature);
+        if (this.indexSignatures) {
+            result = result.concat(this.indexSignatures);
         }
         if (this.getSignature) {
             result.push(this.getSignature);
@@ -152,25 +192,53 @@ export class DeclarationReflection extends ContainerReflection {
         return result;
     }
 
-    /** @internal */
     getNonIndexSignatures(): SignatureReflection[] {
         return ([] as SignatureReflection[]).concat(
             this.signatures ?? [],
             this.setSignature ?? [],
-            this.getSignature ?? []
+            this.getSignature ?? [],
         );
     }
 
-    /**
-     * Traverse all potential child reflections of this reflection.
-     *
-     * The given callback will be invoked for all children, signatures and type parameters
-     * attached to this reflection.
-     *
-     * @param callback  The callback function that should be applied for each child reflection.
-     */
+    getProperties(): DeclarationReflection[] {
+        if (this.children?.length) {
+            return this.children;
+        }
+
+        if (this.type?.type === "reflection") {
+            return this.type.declaration.children ?? [];
+        }
+        return [];
+    }
+
+    getChildOrTypePropertyByName(
+        path: string[],
+    ): DeclarationReflection | undefined {
+        if (this.type?.type === "reflection") {
+            for (const child of this.type.declaration.children || []) {
+                if (path[0] === child.name) {
+                    if (path.length === 1) {
+                        return child;
+                    }
+                    return child.getChildOrTypePropertyByName(path.slice(1));
+                }
+            }
+        }
+
+        for (const child of this.children || []) {
+            if (path[0] === child.name) {
+                if (path.length === 1) {
+                    return child;
+                }
+                return child.getChildOrTypePropertyByName(path.slice(1));
+            }
+        }
+
+        return undefined;
+    }
+
     override traverse(callback: TraverseCallback) {
-        for (const parameter of this.typeParameters ?? []) {
+        for (const parameter of this.typeParameters?.slice() || []) {
             if (callback(parameter, TraverseProperty.TypeParameter) === false) {
                 return;
             }
@@ -180,25 +248,22 @@ export class DeclarationReflection extends ContainerReflection {
             if (
                 callback(
                     this.type.declaration,
-                    TraverseProperty.TypeLiteral
+                    TraverseProperty.TypeLiteral,
                 ) === false
             ) {
                 return;
             }
         }
 
-        for (const signature of this.signatures ?? []) {
+        for (const signature of this.signatures?.slice() || []) {
             if (callback(signature, TraverseProperty.Signatures) === false) {
                 return;
             }
         }
 
-        if (this.indexSignature) {
+        for (const signature of this.indexSignatures?.slice() || []) {
             if (
-                callback(
-                    this.indexSignature,
-                    TraverseProperty.IndexSignature
-                ) === false
+                callback(signature, TraverseProperty.IndexSignature) === false
             ) {
                 return;
             }
@@ -232,17 +297,136 @@ export class DeclarationReflection extends ContainerReflection {
         let result = super.toString();
 
         if (this.typeParameters) {
-            const parameters: string[] = [];
-            this.typeParameters.forEach((parameter) => {
-                parameters.push(parameter.name);
-            });
+            const parameters: string[] = this.typeParameters.map(
+                (parameter) => parameter.name,
+            );
             result += "<" + parameters.join(", ") + ">";
         }
 
         if (this.type) {
-            result += ":" + this.type.toString();
+            result += ": " + this.type.toString();
         }
 
         return result;
+    }
+
+    override toObject(
+        serializer: Serializer,
+    ): JSONOutput.DeclarationReflection {
+        return {
+            ...super.toObject(serializer),
+            variant: this.variant,
+            packageVersion: this.packageVersion,
+            sources: serializer.toObjectsOptional(this.sources),
+            relevanceBoost:
+                this.relevanceBoost === 1 ? undefined : this.relevanceBoost,
+            typeParameters: serializer.toObjectsOptional(this.typeParameters),
+            type: serializer.toObject(this.type),
+            signatures: serializer.toObjectsOptional(this.signatures),
+            indexSignatures: serializer.toObjectsOptional(this.indexSignatures),
+            getSignature: serializer.toObject(this.getSignature),
+            setSignature: serializer.toObject(this.setSignature),
+            defaultValue: this.defaultValue,
+            overwrites: serializer.toObject(this.overwrites),
+            inheritedFrom: serializer.toObject(this.inheritedFrom),
+            implementationOf: serializer.toObject(this.implementationOf),
+            extendedTypes: serializer.toObjectsOptional(this.extendedTypes),
+            extendedBy: serializer.toObjectsOptional(this.extendedBy),
+            implementedTypes: serializer.toObjectsOptional(
+                this.implementedTypes,
+            ),
+            implementedBy: serializer.toObjectsOptional(this.implementedBy),
+            readme: Comment.serializeDisplayParts(serializer, this.readme),
+        };
+    }
+
+    override fromObject(
+        de: Deserializer,
+        obj: JSONOutput.DeclarationReflection | JSONOutput.ProjectReflection,
+    ): void {
+        super.fromObject(de, obj);
+
+        if (obj.readme) {
+            this.readme = Comment.deserializeDisplayParts(de, obj.readme);
+        }
+
+        // This happens when merging multiple projects together.
+        // If updating this, also check ProjectReflection.fromObject.
+        if (obj.variant === "project") {
+            this.kind = ReflectionKind.Module;
+            this.packageVersion = obj.packageVersion;
+            this.project.files.fromObject(de, obj.files || {});
+
+            de.defer(() => {
+                for (const [id, sid] of Object.entries(obj.symbolIdMap || {})) {
+                    const refl = this.project.getReflectionById(
+                        de.oldIdToNewId[+id] ?? -1,
+                    );
+                    if (refl) {
+                        this.project.registerSymbolId(
+                            refl,
+                            new ReflectionSymbolId(sid),
+                        );
+                    } else {
+                        de.logger.warn(
+                            de.application.i18n.serialized_project_referenced_0_not_part_of_project(
+                                id.toString(),
+                            ),
+                        );
+                    }
+                }
+            });
+            return;
+        }
+
+        this.packageVersion = obj.packageVersion;
+        this.sources = de.reviveMany(
+            obj.sources,
+            (src) => new SourceReference(src.fileName, src.line, src.character),
+        );
+        this.relevanceBoost = obj.relevanceBoost;
+
+        this.typeParameters = de.reviveMany(obj.typeParameters, (tp) =>
+            de.constructReflection(tp),
+        );
+        this.type = de.revive(obj.type, (t) => de.constructType(t));
+        this.signatures = de.reviveMany(obj.signatures, (r) =>
+            de.constructReflection(r),
+        );
+
+        // TypeDoc 0.25, remove check with 0.28.
+        // eslint-disable-next-line @typescript-eslint/no-deprecated
+        if (obj.indexSignature) {
+            this.indexSignatures = [
+                // eslint-disable-next-line @typescript-eslint/no-deprecated
+                de.revive(obj.indexSignature, (r) => de.constructReflection(r)),
+            ];
+        } else {
+            this.indexSignatures = de.reviveMany(obj.indexSignatures, (r) =>
+                de.constructReflection(r),
+            );
+        }
+        this.getSignature = de.revive(obj.getSignature, (r) =>
+            de.constructReflection(r),
+        );
+        this.setSignature = de.revive(obj.setSignature, (r) =>
+            de.constructReflection(r),
+        );
+        this.defaultValue = obj.defaultValue;
+        this.overwrites = de.reviveType(obj.overwrites);
+        this.inheritedFrom = de.reviveType(obj.inheritedFrom);
+        this.implementationOf = de.reviveType(obj.implementationOf);
+        this.extendedTypes = de.reviveMany(obj.extendedTypes, (t) =>
+            de.reviveType(t),
+        );
+        this.extendedBy = de.reviveMany(obj.extendedBy, (t) =>
+            de.reviveType(t),
+        );
+        this.implementedTypes = de.reviveMany(obj.implementedTypes, (t) =>
+            de.reviveType(t),
+        );
+        this.implementedBy = de.reviveMany(obj.implementedBy, (t) =>
+            de.reviveType(t),
+        );
     }
 }

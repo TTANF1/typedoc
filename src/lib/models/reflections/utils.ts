@@ -1,11 +1,11 @@
 export function splitUnquotedString(
     input: string,
-    delimiter: string
+    delimiter: string,
 ): string[] {
     if (input.startsWith(delimiter)) {
         return splitUnquotedString(
             input.substring(delimiter.length),
-            delimiter
+            delimiter,
         );
     }
     if (input.startsWith('"')) {
@@ -19,9 +19,10 @@ export function splitUnquotedString(
             return [input];
         } else {
             const remainder = input.substring(closingQuoteIndex + 1);
-            const result = [input.substring(0, closingQuoteIndex + 1)];
-            result.push(...splitUnquotedString(remainder, delimiter));
-            return result;
+            return [
+                input.substring(0, closingQuoteIndex + 1),
+                ...splitUnquotedString(remainder, delimiter),
+            ];
         }
     } else {
         return input.split(delimiter);

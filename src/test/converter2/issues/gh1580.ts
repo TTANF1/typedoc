@@ -1,3 +1,5 @@
+// Export order matters here. We want TypeDoc to process `B` before `A` so that the
+// implements plugin has to defer handling of `B`
 export { B, A };
 
 class A {
@@ -5,9 +7,7 @@ class A {
     prop!: string;
 
     /** Run docs */
-    run(): void {
-        console.log("A");
-    }
+    run(): void {}
 }
 
 class B extends A {
@@ -15,6 +15,5 @@ class B extends A {
 
     run(): void {
         super.run();
-        console.log("B");
     }
 }

@@ -1,14 +1,29 @@
 import { deepStrictEqual as equal } from "assert";
 import {
     DeclarationReflection,
+    DocumentReflection,
+    LiteralType,
     ProjectReflection,
     ReflectionFlag,
     ReflectionKind,
-} from "../../lib/models";
-import { resetReflectionID } from "../../lib/models/reflections/abstract";
-import { sortReflections } from "../../lib/utils";
+    ReflectionSymbolId,
+} from "../../lib/models/index.js";
+import { resetReflectionID } from "../../lib/models/reflections/abstract.js";
+import { Options } from "../../lib/utils/index.js";
+import { getSortFunction, type SortStrategy } from "../../lib/utils/sort.js";
+import { Internationalization } from "../../lib/internationalization/internationalization.js";
+import { FileRegistry } from "../../lib/models/FileRegistry.js";
 
 describe("Sort", () => {
+    function sortReflections(
+        arr: Array<DeclarationReflection | DocumentReflection>,
+        strategies: SortStrategy[],
+    ) {
+        const opts = new Options(new Internationalization(null).proxy);
+        opts.setValue("sort", strategies);
+        getSortFunction(opts)(arr);
+    }
+
     it("Should sort by name", () => {
         const arr = [
             new DeclarationReflection("a", ReflectionKind.TypeAlias),
@@ -19,7 +34,7 @@ describe("Sort", () => {
         sortReflections(arr, ["alphabetical"]);
         equal(
             arr.map((r) => r.name),
-            ["a", "b", "c"]
+            ["a", "b", "c"],
         );
     });
 
@@ -29,14 +44,14 @@ describe("Sort", () => {
             new DeclarationReflection("b", ReflectionKind.EnumMember),
             new DeclarationReflection("c", ReflectionKind.EnumMember),
         ];
-        arr[0].defaultValue = "123";
-        arr[1].defaultValue = "12";
-        arr[2].defaultValue = "3";
+        arr[0].type = new LiteralType(123);
+        arr[1].type = new LiteralType(12);
+        arr[2].type = new LiteralType(3);
 
         sortReflections(arr, ["enum-value-ascending"]);
         equal(
             arr.map((r) => r.name),
-            ["c", "b", "a"]
+            ["c", "b", "a"],
         );
     });
 
@@ -46,14 +61,14 @@ describe("Sort", () => {
             new DeclarationReflection("b", ReflectionKind.EnumMember),
             new DeclarationReflection("c", ReflectionKind.EnumMember),
         ];
-        arr[0].defaultValue = "123";
-        arr[1].defaultValue = "12";
-        arr[2].defaultValue = "3";
+        arr[0].type = new LiteralType(123);
+        arr[1].type = new LiteralType(12);
+        arr[2].type = new LiteralType(3);
 
         sortReflections(arr, ["enum-value-ascending"]);
         equal(
             arr.map((r) => r.name),
-            ["a", "c", "b"]
+            ["a", "c", "b"],
         );
     });
 
@@ -63,14 +78,14 @@ describe("Sort", () => {
             new DeclarationReflection("b", ReflectionKind.EnumMember),
             new DeclarationReflection("c", ReflectionKind.EnumMember),
         ];
-        arr[0].defaultValue = "123";
-        arr[1].defaultValue = "12";
-        arr[2].defaultValue = "3";
+        arr[0].type = new LiteralType(123);
+        arr[1].type = new LiteralType(12);
+        arr[2].type = new LiteralType(3);
 
         sortReflections(arr, ["enum-value-descending"]);
         equal(
             arr.map((r) => r.name),
-            ["a", "b", "c"]
+            ["a", "b", "c"],
         );
     });
 
@@ -80,14 +95,14 @@ describe("Sort", () => {
             new DeclarationReflection("a", ReflectionKind.EnumMember),
             new DeclarationReflection("b", ReflectionKind.EnumMember),
         ];
-        arr[0].defaultValue = "123";
-        arr[1].defaultValue = "-1";
-        arr[2].defaultValue = "3";
+        arr[0].type = new LiteralType(123);
+        arr[1].type = new LiteralType(-1);
+        arr[2].type = new LiteralType(3);
 
         sortReflections(arr, ["enum-value-descending"]);
         equal(
             arr.map((r) => r.name),
-            ["c", "b", "a"]
+            ["c", "b", "a"],
         );
     });
 
@@ -104,7 +119,7 @@ describe("Sort", () => {
         sortReflections(arr, ["static-first"]);
         equal(
             arr.map((r) => r.name),
-            ["a", "c", "b"]
+            ["a", "c", "b"],
         );
     });
 
@@ -121,7 +136,7 @@ describe("Sort", () => {
         sortReflections(arr, ["instance-first"]);
         equal(
             arr.map((r) => r.name),
-            ["b", "a", "c"]
+            ["b", "a", "c"],
         );
     });
 
@@ -141,7 +156,7 @@ describe("Sort", () => {
         sortReflections(arr, ["visibility"]);
         equal(
             arr.map((r) => r.name),
-            ["c", "d", "a", "b"]
+            ["c", "d", "a", "b"],
         );
     });
 
@@ -156,46 +171,50 @@ describe("Sort", () => {
         sortReflections(arr, ["required-first"]);
         equal(
             arr.map((r) => r.name),
-            ["b", "a"]
+            ["b", "a"],
         );
     });
 
     it("Should sort by kind", () => {
         const arr = [
-            new DeclarationReflection("1", ReflectionKind.Reference),
-            new DeclarationReflection("25", ReflectionKind.SetSignature),
-            new DeclarationReflection("3", ReflectionKind.Module),
-            new DeclarationReflection("4", ReflectionKind.Namespace),
-            new DeclarationReflection("5", ReflectionKind.Enum),
-            new DeclarationReflection("6", ReflectionKind.EnumMember),
-            new DeclarationReflection("16", ReflectionKind.Method),
-            new DeclarationReflection("8", ReflectionKind.Interface),
-            new DeclarationReflection("9", ReflectionKind.TypeAlias),
-            new DeclarationReflection("10", ReflectionKind.Constructor),
-            new DeclarationReflection("11", ReflectionKind.Event),
-            new DeclarationReflection("2", ReflectionKind.Project),
-            new DeclarationReflection("24", ReflectionKind.GetSignature),
-            new DeclarationReflection("13", ReflectionKind.Variable),
-            new DeclarationReflection("14", ReflectionKind.Function),
-            new DeclarationReflection("15", ReflectionKind.Accessor),
-            new DeclarationReflection("12", ReflectionKind.Property),
-            new DeclarationReflection("20", ReflectionKind.TypeLiteral),
-            new DeclarationReflection("17", ReflectionKind.ObjectLiteral),
-            new DeclarationReflection("18", ReflectionKind.Parameter),
-            new DeclarationReflection("19", ReflectionKind.TypeParameter),
-            new DeclarationReflection("21", ReflectionKind.CallSignature),
-            new DeclarationReflection("7", ReflectionKind.Class),
-            new DeclarationReflection(
-                "22",
-                ReflectionKind.ConstructorSignature
-            ),
-            new DeclarationReflection("23", ReflectionKind.IndexSignature),
+            new DeclarationReflection("15", ReflectionKind.Reference),
+            new DeclarationReflection("2", ReflectionKind.Module),
+            new DeclarationReflection("3", ReflectionKind.Namespace),
+            new DeclarationReflection("4", ReflectionKind.Enum),
+            new DeclarationReflection("5", ReflectionKind.EnumMember),
+            new DeclarationReflection("14", ReflectionKind.Method),
+            new DeclarationReflection("7", ReflectionKind.Interface),
+            new DeclarationReflection("8", ReflectionKind.TypeAlias),
+            new DeclarationReflection("9", ReflectionKind.Constructor),
+            new DeclarationReflection("1", ReflectionKind.Project),
+            new DeclarationReflection("11", ReflectionKind.Variable),
+            new DeclarationReflection("12", ReflectionKind.Function),
+            new DeclarationReflection("13", ReflectionKind.Accessor),
+            new DeclarationReflection("10", ReflectionKind.Property),
+            new DeclarationReflection("6", ReflectionKind.Class),
         ];
 
         sortReflections(arr, ["kind"]);
         equal(
             arr.map((r) => r.name),
-            Array.from({ length: arr.length }, (_, i) => (i + 1).toString())
+            Array.from({ length: arr.length }, (_, i) => (i + 1).toString()),
+        );
+    });
+
+    it("Should sort by external last", () => {
+        const arr = [
+            new DeclarationReflection("a", ReflectionKind.Function),
+            new DeclarationReflection("b", ReflectionKind.Function),
+            new DeclarationReflection("c", ReflectionKind.Function),
+        ];
+        arr[0].setFlag(ReflectionFlag.External, true);
+        arr[1].setFlag(ReflectionFlag.External, false);
+        arr[2].setFlag(ReflectionFlag.External, true);
+
+        sortReflections(arr, ["external-last"]);
+        equal(
+            arr.map((r) => r.name),
+            ["b", "a", "c"],
         );
     });
 
@@ -213,12 +232,12 @@ describe("Sort", () => {
         sortReflections(arr, ["required-first", "alphabetical"]);
         equal(
             arr.map((r) => r.id),
-            [1, 3, 0, 2]
+            [1, 3, 0, 2],
         );
     });
 
     it("source-order should do nothing if no symbols are available", () => {
-        const proj = new ProjectReflection("");
+        const proj = new ProjectReflection("", new FileRegistry());
         const arr = [
             new DeclarationReflection("b", ReflectionKind.Function, proj),
             new DeclarationReflection("a", ReflectionKind.Function, proj),
@@ -227,7 +246,124 @@ describe("Sort", () => {
         sortReflections(arr, ["source-order", "alphabetical"]);
         equal(
             arr.map((r) => r.name),
-            ["a", "b"]
+            ["a", "b"],
+        );
+    });
+
+    it("source-order should sort by file, then by position in file", () => {
+        const aId = new ReflectionSymbolId({
+            sourceFileName: "a.ts",
+            qualifiedName: "a",
+        });
+        aId.pos = 1;
+        const bId = new ReflectionSymbolId({
+            sourceFileName: "a.ts",
+            qualifiedName: "b",
+        });
+        bId.pos = 2;
+        const cId = new ReflectionSymbolId({
+            sourceFileName: "b.ts",
+            qualifiedName: "c",
+        });
+        cId.pos = 0;
+
+        const proj = new ProjectReflection("", new FileRegistry());
+        const a = new DeclarationReflection("a", ReflectionKind.Variable, proj);
+        proj.registerSymbolId(a, aId);
+
+        const b = new DeclarationReflection("b", ReflectionKind.Variable, proj);
+        proj.registerSymbolId(b, bId);
+
+        const c = new DeclarationReflection("c", ReflectionKind.Variable, proj);
+        proj.registerSymbolId(c, cId);
+
+        const arr = [c, b, a];
+
+        sortReflections(arr, ["source-order"]);
+        equal(
+            arr.map((r) => r.name),
+            ["a", "b", "c"],
+        );
+    });
+
+    it("enum-member-source-order should do nothing if not an enum member", () => {
+        const bId = new ReflectionSymbolId({
+            sourceFileName: "a.ts",
+            qualifiedName: "b",
+        });
+        bId.pos = 2;
+        const cId = new ReflectionSymbolId({
+            sourceFileName: "a.ts",
+            qualifiedName: "c",
+        });
+        cId.pos = 1;
+
+        const proj = new ProjectReflection("", new FileRegistry());
+        const a = new DeclarationReflection("a", ReflectionKind.Variable, proj);
+
+        const b = new DeclarationReflection(
+            "b",
+            ReflectionKind.EnumMember,
+            proj,
+        );
+        proj.registerSymbolId(b, bId);
+
+        const c = new DeclarationReflection(
+            "c",
+            ReflectionKind.EnumMember,
+            proj,
+        );
+        proj.registerSymbolId(c, cId);
+
+        const d = new DeclarationReflection("d", ReflectionKind.Variable, proj);
+
+        const arr = [d, c, b, a];
+        sortReflections(arr, ["enum-member-source-order", "alphabetical"]);
+        equal(
+            arr.map((r) => r.name),
+            ["a", "c", "b", "d"],
+        );
+    });
+
+    it("Should handle documents-first ordering", () => {
+        const proj = new ProjectReflection("", new FileRegistry());
+        const a = new DocumentReflection("a", proj, [], {});
+        const b = new DocumentReflection("b", proj, [], {});
+        const c = new DeclarationReflection("c", ReflectionKind.Class, proj);
+
+        const arr = [a, b, c];
+        sortReflections(arr, ["documents-first", "alphabetical"]);
+        equal(
+            arr.map((r) => r.name),
+            ["a", "b", "c"],
+        );
+
+        const arr2 = [c, b, a];
+        sortReflections(arr2, ["documents-first", "alphabetical"]);
+        equal(
+            arr2.map((r) => r.name),
+            ["a", "b", "c"],
+        );
+    });
+
+    it("Should handle documents-last ordering", () => {
+        const proj = new ProjectReflection("", new FileRegistry());
+        const a = new DocumentReflection("a", proj, [], {});
+        const b = new DocumentReflection("b", proj, [], {});
+        const c = new DeclarationReflection("c", ReflectionKind.Class, proj);
+
+        const arr = [a, b, c];
+        sortReflections(arr, ["documents-last", "alphabetical"]);
+        equal(
+            arr.map((r) => r.name),
+            ["c", "a", "b"],
+        );
+
+        const arr2 = [a, c, b];
+        sortReflections(arr2, ["documents-last", "alphabetical"]);
+        equal(
+            arr2.map((r) => r.name),
+            ["c", "a", "b"],
         );
     });
 });

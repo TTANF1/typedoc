@@ -19,7 +19,15 @@ labels: bug
 ## Steps to reproduce the bug
 
 <!--
-If possible, please create a *minimal* repo reproducing your problem and link it.
+Note: Turn off skipErrorChecks before reporting a crash. Bug reports for crashes with that option
+on are out of scope.
+
+Note: Please try to reproduce the issue WITHOUT any plugins enabled before reporting a bug.
+
+If possible, please create a *minimal* repo reproducing your problem.
+If it is more than a single small file, please submit a pull request to
+https://github.com/TypeStrong/typedoc-repros
+which changes the files necessary to reproduce your bug.
 
 If this is not possible, include at least:
     1. Installed packages + versions

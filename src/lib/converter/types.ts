@@ -1,5 +1,5 @@
-import * as assert from "assert";
-import * as ts from "typescript";
+import assert from "assert";
+import ts from "typescript";
 import {
     ArrayType,
     ConditionalType,
@@ -16,7 +16,6 @@ import {
     ReflectionType,
     LiteralType,
     TupleType,
-    Type,
     TypeOperatorType,
     UnionType,
     UnknownType,
@@ -26,30 +25,40 @@ import {
     OptionalType,
     RestType,
     TemplateLiteralType,
-    SomeType,
-} from "../models";
-import { zip } from "../utils/array";
-import type { Context } from "./context";
-import { ConverterEvents } from "./converter-events";
-import { convertIndexSignature } from "./factories/index-signature";
+    type SomeType,
+} from "../models/index.js";
+import { ReflectionSymbolId } from "../models/reflections/ReflectionSymbolId.js";
+import { zip } from "../utils/array.js";
+import type { Context } from "./context.js";
+import { ConverterEvents } from "./converter-events.js";
+import { convertIndexSignatures } from "./factories/index-signature.js";
 import {
     convertParameterNodes,
     convertTypeParameterNodes,
     createSignature,
-} from "./factories/signature";
-import { convertSymbol } from "./symbols";
-import { removeUndefined } from "./utils/reflections";
+} from "./factories/signature.js";
+import { convertSymbol } from "./symbols.js";
+import { isObjectType, isTypeReference } from "./utils/nodes.js";
+import { removeUndefined } from "./utils/reflections.js";
+import type { TranslatedString } from "../internationalization/internationalization.js";
 
 export interface TypeConverter<
     TNode extends ts.TypeNode = ts.TypeNode,
-    TType extends ts.Type = ts.Type
+    TType extends ts.Type = ts.Type,
 > {
     kind: TNode["kind"][];
     // getTypeAtLocation is expensive, so don't pass the type here.
     convert(context: Context, node: TNode): SomeType;
     // We use typeToTypeNode to figure out what method to call in the first place,
     // so we have a non-type-checkable node here, necessary for some converters.
-    convertType(context: Context, type: TType, node: TNode): SomeType;
+    // We *may* also have an original node which is the node the type was originally
+    // retrieved from.
+    convertType(
+        context: Context,
+        type: TType,
+        serializedNode: TNode,
+        originalNode: ts.TypeNode | undefined,
+    ): SomeType;
 }
 
 const converters = new Map<ts.SyntaxKind, TypeConverter>();
@@ -66,6 +75,7 @@ export function loadConverters() {
         indexedAccessConverter,
         inferredConverter,
         intersectionConverter,
+        intrinsicConverter,
         jsDocVariadicTypeConverter,
         keywordConverter,
         optionalConverter,
@@ -83,6 +93,7 @@ export function loadConverters() {
         tupleConverter,
         typeOperatorConverter,
         unionConverter,
+        jSDocTypeExpressionConverter,
         // Only used if skipLibCheck: true
         jsDocNullableTypeConverter,
         jsDocNonNullableTypeConverter,
@@ -100,53 +111,90 @@ export function loadConverters() {
 
 // This ought not be necessary, but we need some way to discover recursively
 // typed symbols which do not have type nodes. See the `recursive` symbol in the variables test.
-const seenTypeSymbols = new Set<ts.Symbol>();
+const seenTypes = new Set<number>();
 
+function maybeConvertType(
+    context: Context,
+    typeOrNode: ts.Type | ts.TypeNode | undefined,
+): SomeType | undefined {
+    if (!typeOrNode) {
+        return;
+    }
+
+    return convertType(context, typeOrNode);
+}
+
+let typeConversionDepth = 0;
 export function convertType(
     context: Context,
-    typeOrNode: ts.Type | ts.TypeNode | undefined
+    typeOrNode: ts.Type | ts.TypeNode | undefined,
+    maybeNode?: ts.TypeNode,
 ): SomeType {
     if (!typeOrNode) {
         return new IntrinsicType("any");
+    }
+
+    if (typeConversionDepth > context.converter.maxTypeConversionDepth) {
+        return new UnknownType("...");
     }
 
     loadConverters();
     if ("kind" in typeOrNode) {
         const converter = converters.get(typeOrNode.kind);
         if (converter) {
-            return converter.convert(context, typeOrNode);
+            ++typeConversionDepth;
+            const result = converter.convert(context, typeOrNode);
+            --typeConversionDepth;
+            return result;
         }
         return requestBugReport(context, typeOrNode);
+    }
+
+    // TS 4.2 added this to enable better tracking of type aliases.
+    // We need to check it here, not just in the union checker, because typeToTypeNode
+    // will use the origin when serializing
+    // aliasSymbol check is important - #2468
+    if (typeOrNode.isUnion() && typeOrNode.origin && !typeOrNode.aliasSymbol) {
+        // Don't increment typeConversionDepth as this is a transparent step to the user.
+        return convertType(context, typeOrNode.origin);
     }
 
     // IgnoreErrors is important, without it, we can't assert that we will get a node.
     const node = context.checker.typeToTypeNode(
         typeOrNode,
         void 0,
-        ts.NodeBuilderFlags.IgnoreErrors
+        ts.NodeBuilderFlags.IgnoreErrors,
     );
     assert(node); // According to the TS source of typeToString, this is a bug if it does not hold.
 
-    const symbol = typeOrNode.getSymbol();
-    if (symbol) {
-        if (
-            node.kind !== ts.SyntaxKind.TypeReference &&
-            node.kind !== ts.SyntaxKind.ArrayType &&
-            seenTypeSymbols.has(symbol)
-        ) {
-            const typeString = context.checker.typeToString(typeOrNode);
-            context.logger.verbose(
-                `Refusing to recurse when converting type: ${typeString}`
-            );
-            return new UnknownType(typeString);
-        }
-        seenTypeSymbols.add(symbol);
+    if (seenTypes.has(typeOrNode.id)) {
+        const typeString = context.checker.typeToString(typeOrNode);
+        context.logger.verbose(
+            `Refusing to recurse when converting type: ${typeString}`,
+        );
+        return new UnknownType(typeString);
     }
 
-    const converter = converters.get(node.kind);
+    let converter = converters.get(node.kind);
     if (converter) {
-        const result = converter.convertType(context, typeOrNode, node);
-        if (symbol) seenTypeSymbols.delete(symbol);
+        // Hacky fix for #2011, need to find a better way to choose the converter.
+        if (
+            converter === intersectionConverter &&
+            !typeOrNode.isIntersection()
+        ) {
+            converter = typeLiteralConverter;
+        }
+
+        seenTypes.add(typeOrNode.id);
+        ++typeConversionDepth;
+        const result = converter.convertType(
+            context,
+            typeOrNode,
+            node,
+            maybeNode,
+        );
+        --typeConversionDepth;
+        seenTypes.delete(typeOrNode.id);
         return result;
     }
 
@@ -177,7 +225,7 @@ const conditionalConverter: TypeConverter<
             convertType(context, node.checkType),
             convertType(context, node.extendsType),
             convertType(context, node.trueType),
-            convertType(context, node.falseType)
+            convertType(context, node.falseType),
         );
     },
     convertType(context, type) {
@@ -185,7 +233,7 @@ const conditionalConverter: TypeConverter<
             convertType(context, type.checkType),
             convertType(context, type.extendsType),
             convertType(context, type.resolvedTrueType),
-            convertType(context, type.resolvedFalseType)
+            convertType(context, type.resolvedFalseType),
         );
     },
 };
@@ -202,29 +250,37 @@ const constructorConverter: TypeConverter<ts.ConstructorTypeNode, ts.Type> = {
         const reflection = new DeclarationReflection(
             "__type",
             ReflectionKind.Constructor,
-            context.scope
+            context.scope,
         );
         const rc = context.withScope(reflection);
-        rc.setConvertingTypeNode();
+        rc.convertingTypeNode = true;
 
         context.registerReflection(reflection, symbol);
-        context.trigger(ConverterEvents.CREATE_DECLARATION, reflection, node);
+        context.converter.trigger(
+            ConverterEvents.CREATE_DECLARATION,
+            context,
+            reflection,
+        );
 
         const signature = new SignatureReflection(
             "__type",
             ReflectionKind.ConstructorSignature,
-            reflection
+            reflection,
         );
         // This is unfortunate... but seems the obvious place to put this with the current
         // architecture. Ideally, this would be a property on a "ConstructorType"... but that
         // needs to wait until TypeDoc 0.22 when making other breaking changes.
         if (
             node.modifiers?.some(
-                (m) => m.kind === ts.SyntaxKind.AbstractKeyword
+                (m) => m.kind === ts.SyntaxKind.AbstractKeyword,
             )
         ) {
             signature.setFlag(ReflectionFlag.Abstract);
         }
+        context.project.registerSymbolId(
+            signature,
+            new ReflectionSymbolId(symbol, node),
+        );
         context.registerReflection(signature, void 0);
         const signatureCtx = rc.withScope(signature);
 
@@ -233,32 +289,38 @@ const constructorConverter: TypeConverter<ts.ConstructorTypeNode, ts.Type> = {
         signature.parameters = convertParameterNodes(
             signatureCtx,
             signature,
-            node.parameters
+            node.parameters,
         );
         signature.typeParameters = convertTypeParameterNodes(
             signatureCtx,
-            node.typeParameters
+            node.typeParameters,
         );
 
         return new ReflectionType(reflection);
     },
     convertType(context, type) {
-        if (!type.symbol) {
+        const symbol = type.getSymbol();
+        if (!symbol) {
             return new IntrinsicType("Function");
         }
 
         const reflection = new DeclarationReflection(
             "__type",
             ReflectionKind.Constructor,
-            context.scope
+            context.scope,
         );
-        context.registerReflection(reflection, type.symbol);
-        context.trigger(ConverterEvents.CREATE_DECLARATION, reflection);
+        context.registerReflection(reflection, symbol);
+        context.converter.trigger(
+            ConverterEvents.CREATE_DECLARATION,
+            context,
+            reflection,
+        );
 
         createSignature(
             context.withScope(reflection),
             ReflectionKind.ConstructorSignature,
-            type.getConstructSignatures()[0]
+            type.getConstructSignatures()[0],
+            symbol,
         );
 
         return new ReflectionType(reflection);
@@ -276,14 +338,14 @@ const exprWithTypeArgsConverter: TypeConverter<
         if (!targetSymbol) {
             return convertType(
                 context,
-                context.checker.getTypeAtLocation(node)
+                context.checker.getTypeAtLocation(node),
             );
         }
         const parameters =
             node.typeArguments?.map((type) => convertType(context, type)) ?? [];
         const ref = ReferenceType.createSymbolReference(
             context.resolveAliasedSymbol(targetSymbol),
-            context
+            context,
         );
         ref.typeArguments = parameters;
         return ref;
@@ -303,19 +365,27 @@ const functionTypeConverter: TypeConverter<ts.FunctionTypeNode, ts.Type> = {
         const reflection = new DeclarationReflection(
             "__type",
             ReflectionKind.TypeLiteral,
-            context.scope
+            context.scope,
         );
         const rc = context.withScope(reflection);
 
         context.registerReflection(reflection, symbol);
-        context.trigger(ConverterEvents.CREATE_DECLARATION, reflection, node);
+        context.converter.trigger(
+            ConverterEvents.CREATE_DECLARATION,
+            context,
+            reflection,
+        );
 
         const signature = new SignatureReflection(
             "__type",
             ReflectionKind.CallSignature,
-            reflection
+            reflection,
         );
-        context.registerReflection(signature, void 0);
+        context.project.registerSymbolId(
+            signature,
+            new ReflectionSymbolId(symbol, node),
+        );
+        context.registerReflection(signature, undefined);
         const signatureCtx = rc.withScope(signature);
 
         reflection.signatures = [signature];
@@ -323,32 +393,38 @@ const functionTypeConverter: TypeConverter<ts.FunctionTypeNode, ts.Type> = {
         signature.parameters = convertParameterNodes(
             signatureCtx,
             signature,
-            node.parameters
+            node.parameters,
         );
         signature.typeParameters = convertTypeParameterNodes(
             signatureCtx,
-            node.typeParameters
+            node.typeParameters,
         );
 
         return new ReflectionType(reflection);
     },
     convertType(context, type) {
-        if (!type.symbol) {
+        const symbol = type.getSymbol();
+        if (!symbol) {
             return new IntrinsicType("Function");
         }
 
         const reflection = new DeclarationReflection(
             "__type",
             ReflectionKind.TypeLiteral,
-            context.scope
+            context.scope,
         );
-        context.registerReflection(reflection, type.symbol);
-        context.trigger(ConverterEvents.CREATE_DECLARATION, reflection);
+        context.registerReflection(reflection, symbol);
+        context.converter.trigger(
+            ConverterEvents.CREATE_DECLARATION,
+            context,
+            reflection,
+        );
 
         createSignature(
             context.withScope(reflection),
             ReflectionKind.CallSignature,
-            type.getCallSignatures()[0]
+            type.getCallSignatures()[0],
+            type.getSymbol(),
         );
 
         return new ReflectionType(reflection);
@@ -359,12 +435,17 @@ const importType: TypeConverter<ts.ImportTypeNode> = {
     kind: [ts.SyntaxKind.ImportType],
     convert(context, node) {
         const name = node.qualifier?.getText() ?? "__module";
-        const symbol = context.checker.getSymbolAtLocation(node);
-        assert(symbol, "Missing symbol when converting import type node");
+        const symbol = context.getSymbolAtLocation(node.qualifier || node);
+        // #2792, we should always have a symbol here unless there is a compiler
+        // error ignored with ts-expect-error or ts-ignore.
+        if (!symbol) {
+            return new IntrinsicType("any");
+        }
+
         return ReferenceType.createSymbolReference(
             context.resolveAliasedSymbol(symbol),
             context,
-            name
+            name,
         );
     },
     convertType(context, type) {
@@ -373,7 +454,7 @@ const importType: TypeConverter<ts.ImportTypeNode> = {
         return ReferenceType.createSymbolReference(
             context.resolveAliasedSymbol(symbol),
             context,
-            "__module"
+            "__module",
         );
     },
 };
@@ -386,24 +467,30 @@ const indexedAccessConverter: TypeConverter<
     convert(context, node) {
         return new IndexedAccessType(
             convertType(context, node.objectType),
-            convertType(context, node.indexType)
+            convertType(context, node.indexType),
         );
     },
     convertType(context, type) {
         return new IndexedAccessType(
             convertType(context, type.objectType),
-            convertType(context, type.indexType)
+            convertType(context, type.indexType),
         );
     },
 };
 
 const inferredConverter: TypeConverter<ts.InferTypeNode> = {
     kind: [ts.SyntaxKind.InferType],
-    convert(_context, node) {
-        return new InferredType(node.typeParameter.getText());
+    convert(context, node) {
+        return new InferredType(
+            node.typeParameter.name.text,
+            maybeConvertType(context, node.typeParameter.constraint),
+        );
     },
-    convertType(_context, type) {
-        return new InferredType(type.symbol.name);
+    convertType(context, type) {
+        return new InferredType(
+            type.getSymbol()!.name,
+            maybeConvertType(context, type.getConstraint()),
+        );
     },
 };
 
@@ -414,13 +501,26 @@ const intersectionConverter: TypeConverter<
     kind: [ts.SyntaxKind.IntersectionType],
     convert(context, node) {
         return new IntersectionType(
-            node.types.map((type) => convertType(context, type))
+            node.types.map((type) => convertType(context, type)),
         );
     },
     convertType(context, type) {
         return new IntersectionType(
-            type.types.map((type) => convertType(context, type))
+            type.types.map((type) => convertType(context, type)),
         );
+    },
+};
+
+const intrinsicConverter: TypeConverter<
+    ts.KeywordTypeNode<ts.SyntaxKind.IntrinsicKeyword>,
+    ts.Type
+> = {
+    kind: [ts.SyntaxKind.IntrinsicKeyword],
+    convert() {
+        return new IntrinsicType("intrinsic");
+    },
+    convertType() {
+        return new IntrinsicType("intrinsic");
     },
 };
 
@@ -429,8 +529,10 @@ const jsDocVariadicTypeConverter: TypeConverter<ts.JSDocVariadicType> = {
     convert(context, node) {
         return new ArrayType(convertType(context, node.type));
     },
-    // Should just be an ArrayType
-    convertType: requestBugReport,
+    convertType(context, type, _node, origNode) {
+        assert(isTypeReference(type));
+        return arrayConverter.convertType(context, type, null!, origNode);
+    },
 };
 
 const keywordNames = {
@@ -474,7 +576,7 @@ const optionalConverter: TypeConverter<ts.OptionalTypeNode> = {
     kind: [ts.SyntaxKind.OptionalType],
     convert(context, node) {
         return new OptionalType(
-            removeUndefined(convertType(context, node.type))
+            removeUndefined(convertType(context, node.type)),
         );
     },
     // Handled by the tuple converter
@@ -518,37 +620,55 @@ const typeLiteralConverter: TypeConverter<ts.TypeLiteralNode> = {
         const reflection = new DeclarationReflection(
             "__type",
             ReflectionKind.TypeLiteral,
-            context.scope
+            context.scope,
         );
         const rc = context.withScope(reflection);
-        rc.setConvertingTypeNode();
+        rc.convertingTypeNode = true;
 
         context.registerReflection(reflection, symbol);
-        context.trigger(ConverterEvents.CREATE_DECLARATION, reflection, node);
+        context.converter.trigger(
+            ConverterEvents.CREATE_DECLARATION,
+            context,
+            reflection,
+        );
 
         for (const prop of context.checker.getPropertiesOfType(type)) {
             convertSymbol(rc, prop);
         }
         for (const signature of type.getCallSignatures()) {
-            createSignature(rc, ReflectionKind.CallSignature, signature);
+            createSignature(
+                rc,
+                ReflectionKind.CallSignature,
+                signature,
+                symbol,
+            );
+        }
+        for (const signature of type.getConstructSignatures()) {
+            createSignature(
+                rc,
+                ReflectionKind.ConstructorSignature,
+                signature,
+                symbol,
+            );
         }
 
-        convertIndexSignature(rc, symbol);
+        convertIndexSignatures(rc, type);
 
         return new ReflectionType(reflection);
     },
     convertType(context, type) {
-        if (!type.symbol) {
-            return new IntrinsicType("Object");
-        }
-
+        const symbol = type.getSymbol();
         const reflection = new DeclarationReflection(
             "__type",
             ReflectionKind.TypeLiteral,
-            context.scope
+            context.scope,
         );
-        context.registerReflection(reflection, type.symbol);
-        context.trigger(ConverterEvents.CREATE_DECLARATION, reflection);
+        context.registerReflection(reflection, symbol);
+        context.converter.trigger(
+            ConverterEvents.CREATE_DECLARATION,
+            context,
+            reflection,
+        );
 
         for (const prop of context.checker.getPropertiesOfType(type)) {
             convertSymbol(context.withScope(reflection), prop);
@@ -557,11 +677,22 @@ const typeLiteralConverter: TypeConverter<ts.TypeLiteralNode> = {
             createSignature(
                 context.withScope(reflection),
                 ReflectionKind.CallSignature,
-                signature
+                signature,
+                symbol,
+            );
+        }
+        for (const signature of type.getConstructSignatures()) {
+            createSignature(
+                context.withScope(reflection),
+                ReflectionKind.ConstructorSignature,
+                signature,
+                symbol,
             );
         }
 
-        convertIndexSignature(context.withScope(reflection), type.symbol);
+        if (symbol) {
+            convertIndexSignatures(context.withScope(reflection), type);
+        }
 
         return new ReflectionType(reflection);
     },
@@ -577,47 +708,51 @@ const queryConverter: TypeConverter<ts.TypeQueryNode> = {
             return new QueryType(
                 ReferenceType.createBrokenReference(
                     node.exprName.getText(),
-                    context.project
-                )
+                    context.project,
+                ),
             );
         }
 
-        return new QueryType(
-            ReferenceType.createSymbolReference(
-                context.resolveAliasedSymbol(querySymbol),
-                context,
-                node.exprName.getText()
-            )
+        const ref = ReferenceType.createSymbolReference(
+            context.resolveAliasedSymbol(querySymbol),
+            context,
+            node.exprName.getText(),
         );
+        ref.preferValues = true;
+        return new QueryType(ref);
     },
-    convertType(context, type) {
-        const symbol = type.getSymbol();
+    convertType(context, type, node) {
+        // Order matters here - check the node location first so that if the typeof is targeting
+        // an instantiation expression we get the user's exprName.
+        const symbol =
+            context.getSymbolAtLocation(node.exprName) || type.getSymbol();
         assert(
             symbol,
             `Query type failed to get a symbol for: ${context.checker.typeToString(
-                type
-            )}. This is a bug.`
+                type,
+            )}. This is a bug.`,
         );
-        return new QueryType(
-            ReferenceType.createSymbolReference(
-                context.resolveAliasedSymbol(symbol),
-                context
-            )
+        const ref = ReferenceType.createSymbolReference(
+            context.resolveAliasedSymbol(symbol),
+            context,
         );
+        ref.preferValues = true;
+        return new QueryType(ref);
     },
 };
 
 const referenceConverter: TypeConverter<
     ts.TypeReferenceNode,
-    ts.TypeReference
+    ts.TypeReference | ts.StringMappingType | ts.SubstitutionType
 > = {
     kind: [ts.SyntaxKind.TypeReference],
     convert(context, node) {
+        const type = context.checker.getTypeAtLocation(node.typeName);
         const isArray =
             context.checker.typeToTypeNode(
-                context.checker.getTypeAtLocation(node.typeName),
+                type,
                 void 0,
-                ts.NodeBuilderFlags.IgnoreErrors
+                ts.NodeBuilderFlags.IgnoreErrors,
             )?.kind === ts.SyntaxKind.ArrayType;
 
         if (isArray) {
@@ -626,36 +761,108 @@ const referenceConverter: TypeConverter<
 
         const symbol = context.expectSymbolAtLocation(node.typeName);
 
+        // Ignore @inline if there are type arguments, as they won't be resolved
+        // in the type we just retrieved from node.typeName.
+        if (
+            !node.typeArguments &&
+            context
+                .getComment(symbol, ReflectionKind.Interface)
+                ?.hasModifier("@inline")
+        ) {
+            // typeLiteralConverter doesn't use the node, so we can get away with lying here.
+            // This might not actually be safe, it appears that it is in the relatively small
+            // amount of testing I've done with it, but I wouldn't be surprised if someone manages
+            // to find a crash.
+            return typeLiteralConverter.convertType(
+                context,
+                type,
+                null!,
+                undefined,
+            );
+        }
+
         const name = node.typeName.getText();
 
-        const type = ReferenceType.createSymbolReference(
+        const ref = ReferenceType.createSymbolReference(
             context.resolveAliasedSymbol(symbol),
             context,
-            name
+            name,
         );
-        type.typeArguments = node.typeArguments?.map((type) =>
-            convertType(context, type)
+        ref.typeArguments = node.typeArguments?.map((type) =>
+            convertType(context, type),
         );
-        return type;
+        return ref;
     },
-    convertType(context, type) {
-        const symbol = type.aliasSymbol ?? type.getSymbol();
+    convertType(context, type, node, originalNode) {
+        // typeName.symbol handles the case where this is a union which happens to refer
+        // to an enumeration. TS doesn't put the symbol on the type for some reason, but
+        // does add it to the constructed type node.
+        const symbol =
+            type.aliasSymbol ?? type.getSymbol() ?? node.typeName.symbol;
         if (!symbol) {
             // This happens when we get a reference to a type parameter
             // created within a mapped type, `K` in: `{ [K in T]: string }`
-            return ReferenceType.createBrokenReference(
+            const ref = ReferenceType.createBrokenReference(
                 context.checker.typeToString(type),
-                context.project
+                context.project,
             );
+            ref.refersToTypeParameter = true;
+            return ref;
+        }
+
+        if (
+            context
+                .getComment(symbol, ReflectionKind.Interface)
+                ?.hasModifier("@inline")
+        ) {
+            // typeLiteralConverter doesn't use the node, so we can get away with lying here.
+            // This might not actually be safe, it appears that it is in the relatively small
+            // amount of testing I've done with it, but I wouldn't be surprised if someone manages
+            // to find a crash.
+            return typeLiteralConverter.convertType(
+                context,
+                type,
+                null!,
+                undefined,
+            );
+        }
+
+        let name: string;
+        if (ts.isIdentifier(node.typeName)) {
+            name = node.typeName.text;
+        } else {
+            name = node.typeName.right.text;
         }
 
         const ref = ReferenceType.createSymbolReference(
             context.resolveAliasedSymbol(symbol),
-            context
+            context,
+            name,
         );
-        ref.typeArguments = (
-            type.aliasSymbol ? type.aliasTypeArguments : type.typeArguments
-        )?.map((ref) => convertType(context, ref));
+
+        if (type.flags & ts.TypeFlags.Substitution) {
+            // NoInfer<T>
+            ref.typeArguments = [
+                convertType(context, (type as ts.SubstitutionType).baseType),
+            ];
+        } else if (type.flags & ts.TypeFlags.StringMapping) {
+            ref.typeArguments = [
+                convertType(context, (type as ts.StringMappingType).type),
+            ];
+        } else {
+            const args = type.aliasSymbol
+                ? type.aliasTypeArguments
+                : (type as ts.TypeReference).typeArguments;
+
+            const maxArgLength =
+                originalNode && ts.isTypeReferenceNode(originalNode)
+                    ? (originalNode.typeArguments?.length ?? 0)
+                    : args?.length;
+
+            ref.typeArguments = args
+                ?.slice(0, maxArgLength)
+                .map((ref) => convertType(context, ref));
+        }
         return ref;
     },
 };
@@ -676,7 +883,7 @@ const namedTupleMemberConverter: TypeConverter<ts.NamedTupleMember> = {
         return new NamedTupleMember(
             node.name.getText(),
             !!node.questionToken,
-            innerType
+            innerType,
         );
     },
     // This ought to be impossible.
@@ -712,7 +919,7 @@ const mappedConverter: TypeConverter<
                 : templateType,
             kindToModifier(node.readonlyToken?.kind),
             optionalModifier,
-            node.nameType ? convertType(context, node.nameType) : void 0
+            node.nameType ? convertType(context, node.nameType) : void 0,
         );
     },
     convertType(context, type, node) {
@@ -721,14 +928,14 @@ const mappedConverter: TypeConverter<
         const templateType = convertType(context, type.templateType);
 
         return new MappedType(
-            type.typeParameter.symbol?.name,
+            type.typeParameter.symbol.name || "__type",
             convertType(context, type.typeParameter.getConstraint()),
             optionalModifier === "+"
                 ? removeUndefined(templateType)
                 : templateType,
             kindToModifier(node.readonlyToken?.kind),
             optionalModifier,
-            type.nameType ? convertType(context, type.nameType) : void 0
+            type.nameType ? convertType(context, type.nameType) : void 0,
         );
     },
 };
@@ -741,7 +948,7 @@ const literalTypeConverter: TypeConverter<ts.LiteralTypeNode, ts.LiteralType> =
                 case ts.SyntaxKind.TrueKeyword:
                 case ts.SyntaxKind.FalseKeyword:
                     return new LiteralType(
-                        node.literal.kind === ts.SyntaxKind.TrueKeyword
+                        node.literal.kind === ts.SyntaxKind.TrueKeyword,
                     );
                 case ts.SyntaxKind.StringLiteral:
                     return new LiteralType(node.literal.text);
@@ -755,11 +962,11 @@ const literalTypeConverter: TypeConverter<ts.LiteralTypeNode, ts.LiteralType> =
                     switch (operand.kind) {
                         case ts.SyntaxKind.NumericLiteral:
                             return new LiteralType(
-                                Number(node.literal.getText())
+                                Number(node.literal.getText()),
                             );
                         case ts.SyntaxKind.BigIntLiteral:
                             return new LiteralType(
-                                BigInt(node.literal.getText().replace("n", ""))
+                                BigInt(node.literal.getText().replace("n", "")),
                             );
                         default:
                             return requestBugReport(context, node.literal);
@@ -767,7 +974,7 @@ const literalTypeConverter: TypeConverter<ts.LiteralTypeNode, ts.LiteralType> =
                 }
                 case ts.SyntaxKind.BigIntLiteral:
                     return new LiteralType(
-                        BigInt(node.literal.getText().replace("n", ""))
+                        BigInt(node.literal.getText().replace("n", "")),
                     );
                 case ts.SyntaxKind.NoSubstitutionTemplateLiteral:
                     return new LiteralType(node.literal.text);
@@ -784,7 +991,7 @@ const literalTypeConverter: TypeConverter<ts.LiteralTypeNode, ts.LiteralType> =
                 case ts.SyntaxKind.TrueKeyword:
                 case ts.SyntaxKind.FalseKeyword:
                     return new LiteralType(
-                        node.literal.kind === ts.SyntaxKind.TrueKeyword
+                        node.literal.kind === ts.SyntaxKind.TrueKeyword,
                     );
                 case ts.SyntaxKind.NullKeyword:
                     return new LiteralType(null);
@@ -795,8 +1002,8 @@ const literalTypeConverter: TypeConverter<ts.LiteralTypeNode, ts.LiteralType> =
                     BigInt(
                         `${type.value.negative ? "-" : ""}${
                             type.value.base10Value
-                        }`
-                    )
+                        }`,
+                    ),
                 );
             }
 
@@ -814,12 +1021,12 @@ const templateLiteralConverter: TypeConverter<
             node.head.text,
             node.templateSpans.map((span) => {
                 return [convertType(context, span.type), span.literal.text];
-            })
+            }),
         );
     },
     convertType(context, type) {
         assert(type.texts.length === type.types.length + 1);
-        const parts: [Type, string][] = [];
+        const parts: [SomeType, string][] = [];
         for (const [a, b] of zip(type.types, type.texts.slice(1))) {
             parts.push([convertType(context, a), b]);
         }
@@ -842,7 +1049,7 @@ const tupleConverter: TypeConverter<ts.TupleTypeNode, ts.TupleTypeReference> = {
     kind: [ts.SyntaxKind.TupleType],
     convert(context, node) {
         const elements = node.elements.map((node) =>
-            convertType(context, node)
+            convertType(context, node),
         );
         return new TupleType(elements);
     },
@@ -852,14 +1059,16 @@ const tupleConverter: TypeConverter<ts.TupleTypeNode, ts.TupleTypeReference> = {
 
         if (type.target.labeledElementDeclarations) {
             const namedDeclarations = type.target.labeledElementDeclarations;
-            elements = elements?.map(
-                (el, i) =>
-                    new NamedTupleMember(
-                        namedDeclarations[i].name.getText(),
-                        !!namedDeclarations[i].questionToken,
-                        removeUndefined(el)
-                    )
-            );
+            elements = elements?.map((el, i) => {
+                const namedDecl = namedDeclarations[i];
+                return namedDecl
+                    ? new NamedTupleMember(
+                          namedDecl.name.getText(),
+                          !!namedDecl.questionToken,
+                          removeUndefined(el),
+                      )
+                    : el;
+            });
         }
 
         elements = elements?.map((el, i) => {
@@ -870,8 +1079,8 @@ const tupleConverter: TypeConverter<ts.TupleTypeNode, ts.TupleTypeReference> = {
                         new NamedTupleMember(
                             el.name,
                             el.isOptional,
-                            new ArrayType(el.element)
-                        )
+                            new ArrayType(el.element),
+                        ),
                     );
                 }
 
@@ -903,7 +1112,7 @@ const typeOperatorConverter: TypeConverter<ts.TypeOperatorNode> = {
     convert(context, node) {
         return new TypeOperatorType(
             convertType(context, node.type),
-            supportedOperatorNames[node.operator]
+            supportedOperatorNames[node.operator],
         );
     },
     convertType(context, type, node) {
@@ -925,16 +1134,11 @@ const typeOperatorConverter: TypeConverter<ts.TypeOperatorNode> = {
         // keyof will only show up with generic functions, otherwise it gets eagerly
         // resolved to a union of strings.
         if (node.operator === ts.SyntaxKind.KeyOfKeyword) {
-            // TS 4.2 added this to enable better tracking of type aliases.
-            if (type.isUnion() && type.origin) {
-                return convertType(context, type.origin);
-            }
-
             // There's probably an interface for this somewhere... I couldn't find it.
             const targetType = (type as ts.Type & { type: ts.Type }).type;
             return new TypeOperatorType(
                 convertType(context, targetType),
-                "keyof"
+                "keyof",
             );
         }
 
@@ -948,19 +1152,24 @@ const unionConverter: TypeConverter<ts.UnionTypeNode, ts.UnionType> = {
     kind: [ts.SyntaxKind.UnionType],
     convert(context, node) {
         return new UnionType(
-            node.types.map((type) => convertType(context, type))
+            node.types.map((type) => convertType(context, type)),
         );
     },
     convertType(context, type) {
-        // TS 4.2 added this to enable better tracking of type aliases.
-        if (type.origin) {
-            return convertType(context, type.origin);
-        }
+        const types = type.types.map((type) => convertType(context, type));
+        normalizeUnion(types);
+        sortLiteralUnion(types);
 
-        return new UnionType(
-            type.types.map((type) => convertType(context, type))
-        );
+        return new UnionType(types);
     },
+};
+
+const jSDocTypeExpressionConverter: TypeConverter<ts.JSDocTypeExpression> = {
+    kind: [ts.SyntaxKind.JSDocTypeExpression],
+    convert(context, node) {
+        return convertType(context, node.type);
+    },
+    convertType: requestBugReport,
 };
 
 const jsDocNullableTypeConverter: TypeConverter<ts.JSDocNullableType> = {
@@ -987,28 +1196,18 @@ const jsDocNonNullableTypeConverter: TypeConverter<ts.JSDocNonNullableType> = {
 function requestBugReport(context: Context, nodeOrType: ts.Node | ts.Type) {
     if ("kind" in nodeOrType) {
         const kindName = ts.SyntaxKind[nodeOrType.kind];
-        const { line, character } = ts.getLineAndCharacterOfPosition(
-            nodeOrType.getSourceFile(),
-            nodeOrType.pos
-        );
         context.logger.warn(
-            `Failed to convert type node with kind: ${kindName} and text ${nodeOrType.getText()}. Please report a bug.\n\t` +
-                `${nodeOrType.getSourceFile().fileName}:${
-                    line + 1
-                }:${character}`
+            `Failed to convert type node with kind: ${kindName} and text ${nodeOrType.getText()}. Please report a bug.` as TranslatedString,
+            nodeOrType,
         );
         return new UnknownType(nodeOrType.getText());
     } else {
         const typeString = context.checker.typeToString(nodeOrType);
         context.logger.warn(
-            `Failed to convert type: ${typeString} when converting ${context.scope.getFullName()}. Please report a bug.`
+            `Failed to convert type: ${typeString} when converting ${context.scope.getFullName()}. Please report a bug.` as TranslatedString,
         );
         return new UnknownType(typeString);
     }
-}
-
-function isObjectType(type: ts.Type): type is ts.ObjectType {
-    return typeof (type as any).objectFlags === "number";
 }
 
 function resolveReference(type: ts.Type) {
@@ -1024,7 +1223,7 @@ function kindToModifier(
         | ts.SyntaxKind.MinusToken
         | ts.SyntaxKind.ReadonlyKeyword
         | ts.SyntaxKind.QuestionToken
-        | undefined
+        | undefined,
 ): "+" | "-" | undefined {
     switch (kind) {
         case ts.SyntaxKind.ReadonlyKeyword:
@@ -1035,5 +1234,49 @@ function kindToModifier(
             return "-";
         default:
             return undefined;
+    }
+}
+
+function sortLiteralUnion(types: SomeType[]) {
+    if (
+        types.some((t) => t.type !== "literal" || typeof t.value !== "number")
+    ) {
+        return;
+    }
+
+    types.sort((a, b) => {
+        const aLit = a as LiteralType;
+        const bLit = b as LiteralType;
+
+        return (aLit.value as number) - (bLit.value as number);
+    });
+}
+
+function normalizeUnion(types: SomeType[]) {
+    let trueIndex = -1;
+    let falseIndex = -1;
+    for (
+        let i = 0;
+        i < types.length && (trueIndex === -1 || falseIndex === -1);
+        i++
+    ) {
+        const t = types[i];
+        if (t instanceof LiteralType) {
+            if (t.value === true) {
+                trueIndex = i;
+            }
+            if (t.value === false) {
+                falseIndex = i;
+            }
+        }
+    }
+
+    if (trueIndex !== -1 && falseIndex !== -1) {
+        types.splice(Math.max(trueIndex, falseIndex), 1);
+        types.splice(
+            Math.min(trueIndex, falseIndex),
+            1,
+            new IntrinsicType("boolean"),
+        );
     }
 }

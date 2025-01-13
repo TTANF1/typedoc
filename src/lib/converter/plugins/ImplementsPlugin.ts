@@ -1,84 +1,73 @@
-import * as ts from "typescript";
+import ts from "typescript";
+import { ApplicationEvents } from "../../application-events.js";
 import {
+    type ContainerReflection,
     DeclarationReflection,
-    Reflection,
+    type ProjectReflection,
+    type Reflection,
+    ReflectionFlag,
     ReflectionKind,
     SignatureReflection,
-} from "../../models/reflections/index";
-import { ReferenceType, Type } from "../../models/types";
-import { filterMap, zip } from "../../utils/array";
-import { Component, ConverterComponent } from "../components";
-import type { Context } from "../context";
-import { Converter } from "../converter";
-import { copyComment } from "../utils/reflections";
+} from "../../models/reflections/index.js";
+import {
+    ReferenceType,
+    ReflectionType,
+    type Type,
+} from "../../models/types.js";
+import { filterMap, zip } from "../../utils/array.js";
+import { ConverterComponent } from "../components.js";
+import type { Context } from "../context.js";
+import { getHumanName } from "../../utils/index.js";
+import type { TranslatedString } from "../../internationalization/internationalization.js";
+import { ConverterEvents } from "../converter-events.js";
+import type { Converter } from "../converter.js";
 
 /**
  * A plugin that detects interface implementations of functions and
  * properties on classes and links them.
  */
-@Component({ name: "implements" })
 export class ImplementsPlugin extends ConverterComponent {
     private resolved = new WeakSet<Reflection>();
     private postponed = new WeakMap<Reflection, Set<DeclarationReflection>>();
+    private revivingSerialized = false;
 
-    /**
-     * Create a new ImplementsPlugin instance.
-     */
-    override initialize() {
-        this.listenTo(this.owner, Converter.EVENT_RESOLVE, this.onResolve, -10);
-        this.listenTo(
-            this.owner,
-            Converter.EVENT_CREATE_DECLARATION,
-            this.onDeclaration,
-            -1000
+    constructor(owner: Converter) {
+        super(owner);
+        this.owner.on(
+            ConverterEvents.RESOLVE_END,
+            this.onResolveEnd.bind(this),
         );
-        this.listenTo(
-            this.owner,
-            Converter.EVENT_CREATE_SIGNATURE,
-            this.onSignature,
-            1000
+        this.owner.on(
+            ConverterEvents.CREATE_DECLARATION,
+            this.onDeclaration.bind(this),
+            -1000,
         );
+        this.owner.on(
+            ConverterEvents.CREATE_SIGNATURE,
+            this.onSignature.bind(this),
+            1000,
+        );
+        this.application.on(ApplicationEvents.REVIVE, this.onRevive.bind(this));
     }
 
     /**
      * Mark all members of the given class to be the implementation of the matching interface member.
-     *
-     * @param context  The context object describing the current state the converter is in.
-     * @param classReflection  The reflection of the classReflection class.
-     * @param interfaceReflection  The reflection of the interfaceReflection interface.
      */
-    private analyzeClass(
-        context: Context,
+    private analyzeImplements(
+        project: ProjectReflection,
         classReflection: DeclarationReflection,
-        interfaceReflection: DeclarationReflection
+        interfaceReflection: DeclarationReflection,
     ) {
+        this.handleInheritedComments(classReflection, interfaceReflection);
         if (!interfaceReflection.children) {
             return;
         }
 
         interfaceReflection.children.forEach((interfaceMember) => {
-            let classMember: DeclarationReflection | undefined;
-
-            if (!classReflection.children) {
-                return;
-            }
-
-            for (
-                let index = 0, count = classReflection.children.length;
-                index < count;
-                index++
-            ) {
-                const child = classReflection.children[index];
-                if (child.name !== interfaceMember.name) {
-                    continue;
-                }
-                if (child.flags.isStatic !== interfaceMember.flags.isStatic) {
-                    continue;
-                }
-
-                classMember = child;
-                break;
-            }
+            const classMember = findMatchingMember(
+                interfaceMember,
+                classReflection,
+            );
 
             if (!classMember) {
                 return;
@@ -90,52 +79,46 @@ export class ImplementsPlugin extends ConverterComponent {
                 ReferenceType.createResolvedReference(
                     interfaceMemberName,
                     interfaceMember,
-                    context.project
+                    project,
                 );
-            copyComment(classMember, interfaceMember);
 
-            if (
-                interfaceMember.kindOf(ReflectionKind.Property) &&
-                classMember.kindOf(ReflectionKind.Accessor)
-            ) {
-                if (classMember.getSignature) {
-                    copyComment(classMember.getSignature, interfaceMember);
-                    classMember.getSignature.implementationOf =
-                        classMember.implementationOf;
-                }
-                if (classMember.setSignature) {
-                    copyComment(classMember.setSignature, interfaceMember);
-                    classMember.setSignature.implementationOf =
-                        classMember.implementationOf;
-                }
-            }
+            const intSigs =
+                interfaceMember.signatures ||
+                interfaceMember.type?.visit({
+                    reflection: (r) => r.declaration.signatures,
+                });
 
-            if (
-                interfaceMember.kindOf(ReflectionKind.FunctionOrMethod) &&
-                interfaceMember.signatures &&
-                classMember.signatures
-            ) {
-                for (const [clsSig, intSig] of zip(
-                    classMember.signatures,
-                    interfaceMember.signatures
-                )) {
+            const clsSigs =
+                classMember.signatures ||
+                classMember.type?.visit({
+                    reflection: (r) => r.declaration.signatures,
+                });
+
+            if (intSigs && clsSigs) {
+                for (const [clsSig, intSig] of zip(clsSigs, intSigs)) {
                     if (clsSig.implementationOf) {
+                        const target = intSig.parent.kindOf(
+                            ReflectionKind.FunctionOrMethod,
+                        )
+                            ? intSig
+                            : intSig.parent.parent!;
                         clsSig.implementationOf =
                             ReferenceType.createResolvedReference(
                                 clsSig.implementationOf.name,
-                                intSig,
-                                context.project
+                                target,
+                                project,
                             );
                     }
-                    copyComment(clsSig, intSig);
                 }
             }
+
+            this.handleInheritedComments(classMember, interfaceMember);
         });
     }
 
     private analyzeInheritance(
-        context: Context,
-        reflection: DeclarationReflection
+        project: ProjectReflection,
+        reflection: DeclarationReflection,
     ) {
         const extendedTypes = filterMap(
             reflection.extendedTypes ?? [],
@@ -146,16 +129,14 @@ export class ImplementsPlugin extends ConverterComponent {
                           reflection: DeclarationReflection;
                       })
                     : void 0;
-            }
+            },
         );
 
         for (const parent of extendedTypes) {
+            this.handleInheritedComments(reflection, parent.reflection);
+
             for (const parentMember of parent.reflection.children ?? []) {
-                const child = reflection.children?.find(
-                    (child) =>
-                        child.name == parentMember.name &&
-                        child.flags.isStatic === parentMember.flags.isStatic
-                );
+                const child = findMatchingMember(parentMember, reflection);
 
                 if (child) {
                     const key = child.overwrites
@@ -164,38 +145,50 @@ export class ImplementsPlugin extends ConverterComponent {
 
                     for (const [childSig, parentSig] of zip(
                         child.signatures ?? [],
-                        parentMember.signatures ?? []
+                        parentMember.signatures ?? [],
                     )) {
                         childSig[key] = ReferenceType.createResolvedReference(
                             `${parent.name}.${parentMember.name}`,
                             parentSig,
-                            context.project
+                            project,
                         );
-                        copyComment(childSig, parentSig);
                     }
 
                     child[key] = ReferenceType.createResolvedReference(
                         `${parent.name}.${parentMember.name}`,
                         parentMember,
-                        context.project
+                        project,
                     );
-                    copyComment(child, parentMember);
+
+                    this.handleInheritedComments(child, parentMember);
                 }
             }
         }
     }
 
-    /**
-     * Triggered when the converter resolves a reflection.
-     *
-     * @param context  The context object describing the current state the converter is in.
-     * @param reflection  The reflection that is currently resolved.
-     */
-    private onResolve(context: Context, reflection: DeclarationReflection) {
-        this.tryResolve(context, reflection);
+    private onResolveEnd(context: Context) {
+        this.resolve(context.project);
     }
 
-    private tryResolve(context: Context, reflection: DeclarationReflection) {
+    private onRevive(project: ProjectReflection) {
+        this.revivingSerialized = true;
+        this.resolve(project);
+        this.revivingSerialized = false;
+    }
+
+    private resolve(project: ProjectReflection) {
+        for (const id in project.reflections) {
+            const refl = project.reflections[id];
+            if (refl instanceof DeclarationReflection) {
+                this.tryResolve(project, refl);
+            }
+        }
+    }
+
+    private tryResolve(
+        project: ProjectReflection,
+        reflection: DeclarationReflection,
+    ) {
         const requirements = filterMap(
             [
                 ...(reflection.implementedTypes ?? []),
@@ -203,15 +196,15 @@ export class ImplementsPlugin extends ConverterComponent {
             ],
             (type) => {
                 return type instanceof ReferenceType ? type.reflection : void 0;
-            }
+            },
         );
 
         if (requirements.every((req) => this.resolved.has(req))) {
-            this.doResolve(context, reflection);
+            this.doResolve(project, reflection);
             this.resolved.add(reflection);
 
             for (const refl of this.postponed.get(reflection) ?? []) {
-                this.tryResolve(context, refl);
+                this.tryResolve(project, refl);
             }
             this.postponed.delete(reflection);
         } else {
@@ -223,7 +216,10 @@ export class ImplementsPlugin extends ConverterComponent {
         }
     }
 
-    private doResolve(context: Context, reflection: DeclarationReflection) {
+    private doResolve(
+        project: ProjectReflection,
+        reflection: DeclarationReflection,
+    ) {
         if (
             reflection.kindOf(ReflectionKind.Class) &&
             reflection.implementedTypes
@@ -235,46 +231,40 @@ export class ImplementsPlugin extends ConverterComponent {
 
                 if (
                     type.reflection &&
-                    type.reflection.kindOf(ReflectionKind.Interface)
+                    type.reflection.kindOf(ReflectionKind.ClassOrInterface)
                 ) {
-                    this.analyzeClass(
-                        context,
+                    this.analyzeImplements(
+                        project,
                         reflection,
-                        <DeclarationReflection>type.reflection
+                        type.reflection as DeclarationReflection,
                     );
                 }
             });
         }
 
         if (
-            reflection.kindOf([
-                ReflectionKind.Class,
-                ReflectionKind.Interface,
-            ]) &&
+            reflection.kindOf(ReflectionKind.ClassOrInterface) &&
             reflection.extendedTypes
         ) {
-            this.analyzeInheritance(context, reflection);
+            this.analyzeInheritance(project, reflection);
         }
     }
 
     private getExtensionInfo(
         context: Context,
-        reflection: Reflection | undefined
+        reflection: Reflection | undefined,
     ) {
         if (!reflection || !reflection.kindOf(ReflectionKind.Inheritable)) {
             return;
         }
 
         // Need this because we re-use reflections for type literals.
-        if (
-            !reflection.parent ||
-            !reflection.parent.kindOf(ReflectionKind.ClassOrInterface)
-        ) {
+        if (!reflection.parent?.kindOf(ReflectionKind.ClassOrInterface)) {
             return;
         }
 
         const symbol = context.project.getSymbolFromReflection(
-            reflection.parent
+            reflection.parent,
         );
         if (!symbol) {
             return;
@@ -284,7 +274,7 @@ export class ImplementsPlugin extends ConverterComponent {
             .getDeclarations()
             ?.find(
                 (n): n is ts.ClassDeclaration | ts.InterfaceDeclaration =>
-                    ts.isClassDeclaration(n) || ts.isInterfaceDeclaration(n)
+                    ts.isClassDeclaration(n) || ts.isInterfaceDeclaration(n),
             );
         if (!declaration) {
             return;
@@ -322,7 +312,7 @@ export class ImplementsPlugin extends ConverterComponent {
         const childType = reflection.flags.isStatic
             ? context.checker.getTypeOfSymbolAtLocation(
                   info.symbol,
-                  info.declaration
+                  info.declaration,
               )
             : context.checker.getDeclaredTypeOfSymbol(info.symbol);
 
@@ -335,7 +325,7 @@ export class ImplementsPlugin extends ConverterComponent {
                     reflection.flags.isStatic ? " static" : ""
                 } member "${reflection.escapedName ?? reflection.name}" of "${
                     reflection.parent?.name
-                }" for inheritance analysis. Please report a bug.`
+                }" for inheritance analysis. Please report a bug.` as TranslatedString,
             );
             return;
         }
@@ -352,7 +342,7 @@ export class ImplementsPlugin extends ConverterComponent {
 
             for (const expr of clause.types) {
                 const parentType = context.checker.getTypeAtLocation(
-                    reflection.flags.isStatic ? expr.expression : expr
+                    reflection.flags.isStatic ? expr.expression : expr,
                 );
 
                 const parentProperty = findProperty(reflection, parentType);
@@ -369,7 +359,7 @@ export class ImplementsPlugin extends ConverterComponent {
                         clause,
                         expr,
                         parentProperty,
-                        isInherit
+                        isInherit,
                     );
 
                     // Can't always break because we need to also set `implementationOf` if we
@@ -381,16 +371,115 @@ export class ImplementsPlugin extends ConverterComponent {
             }
         }
     }
+
+    /**
+     * Responsible for copying comments from "parent" reflections defined
+     * in either a base class or implemented interface to the child class.
+     */
+    private handleInheritedComments(
+        child: DeclarationReflection,
+        parent: DeclarationReflection,
+    ) {
+        this.copyComment(child, parent);
+
+        if (
+            parent.kindOf(ReflectionKind.Property) &&
+            child.kindOf(ReflectionKind.Accessor)
+        ) {
+            if (child.getSignature) {
+                this.copyComment(child.getSignature, parent);
+                child.getSignature.implementationOf = child.implementationOf;
+            }
+            if (child.setSignature) {
+                this.copyComment(child.setSignature, parent);
+                child.setSignature.implementationOf = child.implementationOf;
+            }
+        }
+        if (
+            parent.kindOf(ReflectionKind.Accessor) &&
+            child.kindOf(ReflectionKind.Accessor)
+        ) {
+            if (parent.getSignature && child.getSignature) {
+                this.copyComment(child.getSignature, parent.getSignature);
+            }
+            if (parent.setSignature && child.setSignature) {
+                this.copyComment(child.setSignature, parent.setSignature);
+            }
+        }
+
+        if (
+            parent.kindOf(ReflectionKind.FunctionOrMethod) &&
+            parent.signatures &&
+            child.signatures
+        ) {
+            for (const [cs, ps] of zip(child.signatures, parent.signatures)) {
+                this.copyComment(cs, ps);
+            }
+        } else if (
+            parent.kindOf(ReflectionKind.Property) &&
+            parent.type instanceof ReflectionType &&
+            parent.type.declaration.signatures &&
+            child.signatures
+        ) {
+            for (const [cs, ps] of zip(
+                child.signatures,
+                parent.type.declaration.signatures,
+            )) {
+                this.copyComment(cs, ps);
+            }
+        }
+    }
+
+    /**
+     * Copy the comment of the source reflection to the target reflection with a JSDoc style copy
+     * function. The TSDoc copy function is in the InheritDocPlugin.
+     */
+    private copyComment(target: Reflection, source: Reflection) {
+        if (!shouldCopyComment(target, source, this.revivingSerialized)) {
+            return;
+        }
+
+        target.comment = source.comment!.clone();
+
+        if (
+            target instanceof DeclarationReflection &&
+            source instanceof DeclarationReflection
+        ) {
+            for (const [tt, ts] of zip(
+                target.typeParameters || [],
+                source.typeParameters || [],
+            )) {
+                this.copyComment(tt, ts);
+            }
+        }
+        if (
+            target instanceof SignatureReflection &&
+            source instanceof SignatureReflection
+        ) {
+            for (const [tt, ts] of zip(
+                target.typeParameters || [],
+                source.typeParameters || [],
+            )) {
+                this.copyComment(tt, ts);
+            }
+            for (const [pt, ps] of zip(
+                target.parameters || [],
+                source.parameters || [],
+            )) {
+                this.copyComment(pt, ps);
+            }
+        }
+    }
 }
 
 function constructorInheritance(
     context: Context,
     reflection: DeclarationReflection,
     childDecl: ts.ClassDeclaration | ts.InterfaceDeclaration,
-    constructorDecl: ts.ConstructorDeclaration | undefined
+    constructorDecl: ts.ConstructorDeclaration | undefined,
 ) {
     const extendsClause = childDecl.heritageClauses?.find(
-        (cl) => cl.token === ts.SyntaxKind.ExtendsKeyword
+        (cl) => cl.token === ts.SyntaxKind.ExtendsKeyword,
     );
 
     if (!extendsClause) return;
@@ -400,7 +489,7 @@ function constructorInheritance(
 
     reflection[key] ??= ReferenceType.createBrokenReference(
         name,
-        context.project
+        context.project,
     );
 
     for (const sig of reflection.signatures ?? []) {
@@ -412,7 +501,7 @@ function findProperty(reflection: DeclarationReflection, parent: ts.Type) {
     return parent.getProperties().find((prop) => {
         return reflection.escapedName
             ? prop.escapedName === reflection.escapedName
-            : prop.name === reflection.escapedName;
+            : prop.name === reflection.name;
     });
 }
 
@@ -422,44 +511,86 @@ function createLink(
     clause: ts.HeritageClause,
     expr: ts.ExpressionWithTypeArguments,
     symbol: ts.Symbol,
-    isOverwrite: boolean
+    isInherit: boolean,
 ) {
     const project = context.project;
-    const name = `${expr.expression.getText()}.${symbol.name}`;
+    const name = `${expr.expression.getText()}.${getHumanName(symbol.name)}`;
 
     link(reflection);
     link(reflection.getSignature);
     link(reflection.setSignature);
-    link(reflection.indexSignature);
+    for (const sig of reflection.indexSignatures || []) {
+        link(sig);
+    }
     for (const sig of reflection.signatures ?? []) {
         link(sig);
     }
 
     // Intentionally create broken links here. These will be replaced with real links during
-    // resolution if we can do so.
+    // resolution if we can do so. We create broken links rather than real links because in the
+    // case of an inherited symbol, we'll end up referencing a single symbol ID rather than one
+    // for each class.
     function link(
-        target: DeclarationReflection | SignatureReflection | undefined
+        target: DeclarationReflection | SignatureReflection | undefined,
     ) {
         if (!target) return;
 
         if (clause.token === ts.SyntaxKind.ImplementsKeyword) {
             target.implementationOf ??= ReferenceType.createBrokenReference(
                 name,
-                project
+                project,
             );
             return;
         }
 
-        if (isOverwrite) {
+        if (isInherit) {
+            target.setFlag(ReflectionFlag.Inherited);
             target.inheritedFrom ??= ReferenceType.createBrokenReference(
                 name,
-                project
+                project,
             );
         } else {
             target.overwrites ??= ReferenceType.createBrokenReference(
                 name,
-                project
+                project,
             );
         }
     }
+}
+
+function shouldCopyComment(
+    target: Reflection,
+    source: Reflection,
+    revivingSerialized: boolean,
+) {
+    if (!source.comment) {
+        return false;
+    }
+
+    if (target.comment) {
+        // If we're reviving, then the revived project might have a better comment
+        // on source, so copy it.
+        if (revivingSerialized && source.comment.similarTo(target.comment)) {
+            return true;
+        }
+
+        // We might still want to copy, if the child has a JSDoc style inheritDoc tag.
+        const tag = target.comment.getTag("@inheritDoc");
+        if (!tag || tag.name) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+function findMatchingMember(
+    toMatch: Reflection,
+    container: ContainerReflection,
+) {
+    return container.children?.find(
+        (child) =>
+            child.name == toMatch.name &&
+            child.flags.isStatic === toMatch.flags.isStatic,
+    );
 }

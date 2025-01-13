@@ -1,27 +1,34 @@
-import type { DefaultThemeRenderContext } from "../DefaultThemeRenderContext";
-import { JSX } from "../../../../utils";
-import type { DeclarationReflection } from "../../../../models";
+import type { DeclarationReflection } from "../../../../models/index.js";
+import { JSX } from "../../../../utils/index.js";
+import { classNames } from "../../lib.js";
+import type { DefaultThemeRenderContext } from "../DefaultThemeRenderContext.js";
 
 export const memberGetterSetter = (context: DefaultThemeRenderContext, props: DeclarationReflection) => (
     <>
-        <ul class={"tsd-signatures " + props.cssClasses}>
+        <ul
+            class={classNames(
+                {
+                    "tsd-signatures": true,
+                },
+                context.getReflectionClasses(props),
+            )}
+        >
             {!!props.getSignature && (
-                <li class="tsd-signature tsd-kind-icon">
-                    <span class="tsd-signature-symbol">get</span> {props.name}
-                    {context.memberSignatureTitle(props.getSignature, { hideName: true })}
-                </li>
+                <>
+                    <li class="tsd-signature" id={props.getSignature.anchor}>
+                        {context.memberSignatureTitle(props.getSignature)}
+                    </li>
+                    <li class="tsd-description">{context.memberSignatureBody(props.getSignature)}</li>
+                </>
             )}
             {!!props.setSignature && (
-                <li class="tsd-signature tsd-kind-icon">
-                    <span class="tsd-signature-symbol">set</span> {props.name}
-                    {context.memberSignatureTitle(props.setSignature, { hideName: true })}
-                </li>
+                <>
+                    <li class="tsd-signature" id={props.setSignature.anchor}>
+                        {context.memberSignatureTitle(props.setSignature)}
+                    </li>
+                    <li class="tsd-description">{context.memberSignatureBody(props.setSignature)}</li>
+                </>
             )}
-        </ul>
-
-        <ul class="tsd-descriptions">
-            {!!props.getSignature && <li class="tsd-description">{context.memberSignatureBody(props.getSignature)}</li>}
-            {!!props.setSignature && <li class="tsd-description">{context.memberSignatureBody(props.setSignature)}</li>}
         </ul>
     </>
 );

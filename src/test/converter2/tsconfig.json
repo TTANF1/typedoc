@@ -1,12 +1,14 @@
 {
     "compilerOptions": {
         "strict": true,
-        "module": "CommonJS",
-        "allowJs": true,
+        "module": "Node16",
+        "checkJs": true,
         "outDir": "dist",
         "target": "ESNext",
+        "noImplicitAny": false,
+        // GH2774 test case needs global files
+        "moduleDetection": "legacy",
 
-        // See #1524. We might force this to false eventually.
         "skipLibCheck": true
     },
     "typedocOptions": {

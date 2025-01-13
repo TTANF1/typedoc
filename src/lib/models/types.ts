@@ -1,11 +1,25 @@
-import type * as ts from "typescript";
-import type { Context } from "../converter";
-import { Reflection } from "./reflections/abstract";
-import type { DeclarationReflection } from "./reflections/declaration";
-import type { ProjectReflection } from "./reflections/project";
+import ts from "typescript";
+import type { Context } from "../converter/index.js";
+import type { Reflection } from "./reflections/abstract.js";
+import type { DeclarationReflection } from "./reflections/declaration.js";
+import type { ProjectReflection } from "./reflections/project.js";
+import type {
+    Serializer,
+    JSONOutput,
+    Deserializer,
+} from "../serialization/index.js";
+import { getQualifiedName } from "../utils/tsutils.js";
+import { ReflectionSymbolId } from "./reflections/ReflectionSymbolId.js";
+import type { DeclarationReference } from "../converter/comments/declarationReference.js";
+import { findPackageForPath } from "../utils/fs.js";
+import { ReflectionKind } from "./reflections/kind.js";
+import { Comment, type CommentDisplayPart } from "./comments/index.js";
+import { joinArray } from "../utils/array.js";
+import type { SignatureReflection } from "./reflections/signature.js";
 
 /**
  * Base class of all type definitions.
+ * @category Types
  */
 export abstract class Type {
     /**
@@ -16,16 +30,54 @@ export abstract class Type {
     /**
      * Return a string representation of this type.
      */
-    abstract toString(): string;
+    toString(): string {
+        return this.stringify(TypeContext.none);
+    }
 
     /**
      * Visit this type, returning the value returned by the visitor.
      */
-    visit<T>(visitor: TypeVisitor<T>): T {
-        return visitor[this.type](this as never);
+    visit<T, A extends any[] = []>(visitor: TypeVisitor<T, A>, ...args: A): T;
+    visit<T, A extends any[] = []>(
+        visitor: Partial<TypeVisitor<T, A>>,
+        ...args: A
+    ): T | undefined;
+    visit(
+        visitor: Partial<TypeVisitor<unknown, any[]>>,
+        ...args: any[]
+    ): unknown {
+        return visitor[this.type]?.(this as never, ...args);
+    }
+
+    stringify(context: TypeContext) {
+        if (this.needsParenthesis(context)) {
+            return `(${this.getTypeString()})`;
+        }
+        return this.getTypeString();
+    }
+
+    abstract toObject(serializer: Serializer): JSONOutput.SomeType;
+
+    // Nothing to do for the majority of types.
+    fromObject(_de: Deserializer, _obj: JSONOutput.SomeType) {}
+
+    abstract needsParenthesis(context: TypeContext): boolean;
+
+    /**
+     * Implementation method for `toString`. `needsParenthesis` will be used to determine if
+     * the returned string should be wrapped in parenthesis.
+     */
+    protected abstract getTypeString(): string;
+
+    /**
+     * Return the estimated size of the type if it was all printed on one line.
+     */
+    estimatePrintWidth(): number {
+        return this.getTypeString().length;
     }
 }
 
+/** @category Types */
 export interface TypeKindMap {
     array: ArrayType;
     conditional: ConditionalType;
@@ -41,28 +93,28 @@ export interface TypeKindMap {
     reference: ReferenceType;
     reflection: ReflectionType;
     rest: RestType;
-    "template-literal": TemplateLiteralType;
+    templateLiteral: TemplateLiteralType;
     tuple: TupleType;
-    "named-tuple-member": NamedTupleMember;
+    namedTupleMember: NamedTupleMember;
     typeOperator: TypeOperatorType;
     union: UnionType;
     unknown: UnknownType;
 }
 
-export type TypeVisitor<T = void> = {
-    [K in TypeKind]: (type: TypeKindMap[K]) => T;
+export type TypeVisitor<T = void, A extends any[] = []> = {
+    [K in TypeKind]: (type: TypeKindMap[K], ...args: A) => T;
 };
 
 export function makeRecursiveVisitor(
-    visitor: Partial<TypeVisitor>
+    visitor: Partial<TypeVisitor>,
 ): TypeVisitor {
     const recursiveVisitor: TypeVisitor = {
-        "named-tuple-member"(type) {
-            visitor["named-tuple-member"]?.(type);
+        namedTupleMember(type) {
+            visitor.namedTupleMember?.(type);
             type.element.visit(recursiveVisitor);
         },
-        "template-literal"(type) {
-            visitor["template-literal"]?.(type);
+        templateLiteral(type) {
+            visitor.templateLiteral?.(type);
             for (const [h] of type.tail) {
                 h.visit(recursiveVisitor);
             }
@@ -85,8 +137,10 @@ export function makeRecursiveVisitor(
         },
         inferred(type) {
             visitor.inferred?.(type);
+            type.constraint?.visit(recursiveVisitor);
         },
         intersection(type) {
+            visitor.intersection?.(type);
             type.types.forEach((t) => t.visit(recursiveVisitor));
         },
         intrinsic(type) {
@@ -145,45 +199,43 @@ export function makeRecursiveVisitor(
     return recursiveVisitor;
 }
 
+/** @category Types */
 export type TypeKind = keyof TypeKindMap;
 
+/** @category Types */
 export type SomeType = TypeKindMap[keyof TypeKindMap];
 
-// A lower binding power means that if contained within a type
-// with a higher binding power the type must be parenthesized.
-// 999 = never have parenthesis
-// -1 = always have parenthesis
-const BINDING_POWERS = {
-    array: 999,
-    conditional: 70,
-    conditionalCheckType: 150,
-    indexedAccess: 999,
-    inferred: 999,
-    intersection: 120,
-    intrinsic: 999,
-    literal: 999,
-    mapped: 999,
-    optional: 999,
-    predicate: 999,
-    query: 900,
-    reference: 999,
-    reflection: 999,
-    rest: 999,
-    "template-literal": 999,
-    tuple: 999,
-    "named-tuple-member": 999,
-    typeOperator: 900,
-    union: 100,
-    // We should always wrap these in parenthesis since we don't know what they contain.
-    unknown: -1,
-};
-
-function wrap(type: Type, bp: number) {
-    if (BINDING_POWERS[type.type] < bp) {
-        return `(${type})`;
-    }
-    return type.toString();
-}
+/**
+ * Enumeration that can be used when traversing types to track the location of recursion.
+ * Used by TypeDoc internally to track when to output parenthesis when rendering.
+ * @enum
+ */
+export const TypeContext = {
+    none: "none",
+    templateLiteralElement: "templateLiteralElement", // `${here}`
+    arrayElement: "arrayElement", // here[]
+    indexedAccessElement: "indexedAccessElement", // {}[here]
+    conditionalCheck: "conditionalCheck", // here extends 1 ? 2 : 3
+    conditionalExtends: "conditionalExtends", // 1 extends here ? 2 : 3
+    conditionalTrue: "conditionalTrue", // 1 extends 2 ? here : 3
+    conditionalFalse: "conditionalFalse", // 1 extends 2 ? 3 : here
+    indexedIndex: "indexedIndex", // {}[here]
+    indexedObject: "indexedObject", // here[1]
+    inferredConstraint: "inferredConstraint", // 1 extends infer X extends here ? 1 : 2
+    intersectionElement: "intersectionElement", // here & 1
+    mappedName: "mappedName", // { [k in string as here]: 1 }
+    mappedParameter: "mappedParameter", // { [k in here]: 1 }
+    mappedTemplate: "mappedTemplate", // { [k in string]: here }
+    optionalElement: "optionalElement", // [here?]
+    predicateTarget: "predicateTarget", // (): X is here
+    queryTypeTarget: "queryTypeTarget", // typeof here, can only ever be a ReferenceType
+    typeOperatorTarget: "typeOperatorTarget", // keyof here
+    referenceTypeArgument: "referenceTypeArgument", // X<here>
+    restElement: "restElement", // [...here]
+    tupleElement: "tupleElement", // [here]
+    unionElement: "unionElement", // here | 1
+} as const;
+export type TypeContext = (typeof TypeContext)[keyof typeof TypeContext];
 
 /**
  * Represents an array type.
@@ -191,22 +243,31 @@ function wrap(type: Type, bp: number) {
  * ```ts
  * let value: string[];
  * ```
+ * @category Types
  */
 export class ArrayType extends Type {
     override readonly type = "array";
 
     /**
-     * The type of the array elements.
+     * @param elementType The type of the elements in the array.
      */
-    elementType: Type;
-
-    constructor(elementType: Type) {
+    constructor(public elementType: SomeType) {
         super();
-        this.elementType = elementType;
     }
 
-    override toString() {
-        return wrap(this.elementType, BINDING_POWERS.array) + "[]";
+    protected override getTypeString() {
+        return this.elementType.stringify(TypeContext.arrayElement) + "[]";
+    }
+
+    override needsParenthesis(): boolean {
+        return false;
+    }
+
+    override toObject(serializer: Serializer): JSONOutput.ArrayType {
+        return {
+            type: this.type,
+            elementType: serializer.toObject(this.elementType),
+        };
     }
 }
 
@@ -216,44 +277,106 @@ export class ArrayType extends Type {
  * ```ts
  * let value: Check extends Extends ? True : False;
  * ```
+ * @category Types
  */
 export class ConditionalType extends Type {
     override readonly type = "conditional";
 
     constructor(
-        public checkType: Type,
-        public extendsType: Type,
-        public trueType: Type,
-        public falseType: Type
+        public checkType: SomeType,
+        public extendsType: SomeType,
+        public trueType: SomeType,
+        public falseType: SomeType,
     ) {
         super();
     }
 
-    override toString() {
+    protected override getTypeString() {
         return [
-            wrap(this.checkType, BINDING_POWERS.conditionalCheckType),
+            this.checkType.stringify(TypeContext.conditionalCheck),
             "extends",
-            this.extendsType, // no need to wrap
+            this.extendsType.stringify(TypeContext.conditionalExtends),
             "?",
-            this.trueType, // no need to wrap
+            this.trueType.stringify(TypeContext.conditionalTrue),
             ":",
-            this.falseType, // no need to wrap
+            this.falseType.stringify(TypeContext.conditionalFalse),
         ].join(" ");
+    }
+
+    override needsParenthesis(context: TypeContext): boolean {
+        const map: Record<TypeContext, boolean> = {
+            none: false,
+            templateLiteralElement: false,
+            arrayElement: true,
+            indexedAccessElement: false,
+            conditionalCheck: true,
+            conditionalExtends: true,
+            conditionalTrue: false,
+            conditionalFalse: false,
+            indexedIndex: false,
+            indexedObject: true,
+            inferredConstraint: true,
+            intersectionElement: true,
+            mappedName: false,
+            mappedParameter: false,
+            mappedTemplate: false,
+            optionalElement: true,
+            predicateTarget: false,
+            queryTypeTarget: false,
+            typeOperatorTarget: true,
+            referenceTypeArgument: false,
+            restElement: true,
+            tupleElement: false,
+            unionElement: true,
+        };
+
+        return map[context];
+    }
+
+    override toObject(serializer: Serializer): JSONOutput.ConditionalType {
+        return {
+            type: this.type,
+            checkType: serializer.toObject(this.checkType),
+            extendsType: serializer.toObject(this.extendsType),
+            trueType: serializer.toObject(this.trueType),
+            falseType: serializer.toObject(this.falseType),
+        };
     }
 }
 
 /**
  * Represents an indexed access type.
+ * @category Types
  */
 export class IndexedAccessType extends Type {
     override readonly type = "indexedAccess";
 
-    constructor(public objectType: Type, public indexType: Type) {
+    constructor(
+        public objectType: SomeType,
+        public indexType: SomeType,
+    ) {
         super();
     }
 
-    override toString() {
-        return `${this.objectType}[${this.indexType}]`;
+    protected override getTypeString() {
+        return [
+            this.objectType.stringify(TypeContext.indexedObject),
+            "[",
+            this.indexType.stringify(TypeContext.indexedIndex),
+            "]",
+        ].join("");
+    }
+
+    override needsParenthesis(): boolean {
+        return false;
+    }
+
+    override toObject(serializer: Serializer): JSONOutput.IndexedAccessType {
+        return {
+            type: this.type,
+            indexType: serializer.toObject(this.indexType),
+            objectType: serializer.toObject(this.objectType),
+        };
     }
 }
 
@@ -263,16 +386,63 @@ export class IndexedAccessType extends Type {
  * ```ts
  * type Z = Promise<string> extends Promise<infer U> : never
  * ```
+ * @category Types
  */
 export class InferredType extends Type {
     override readonly type = "inferred";
 
-    constructor(public name: string) {
+    constructor(
+        public name: string,
+        public constraint?: SomeType,
+    ) {
         super();
     }
 
-    override toString() {
+    protected override getTypeString() {
+        if (this.constraint) {
+            return `infer ${this.name} extends ${this.constraint.stringify(
+                TypeContext.inferredConstraint,
+            )}`;
+        }
         return `infer ${this.name}`;
+    }
+
+    override needsParenthesis(context: TypeContext): boolean {
+        const map: Record<TypeContext, boolean> = {
+            none: false,
+            templateLiteralElement: false,
+            arrayElement: true,
+            indexedAccessElement: false,
+            conditionalCheck: false,
+            conditionalExtends: false,
+            conditionalTrue: false,
+            conditionalFalse: false,
+            indexedIndex: false,
+            indexedObject: true,
+            inferredConstraint: false,
+            intersectionElement: false,
+            mappedName: false,
+            mappedParameter: false,
+            mappedTemplate: false,
+            optionalElement: true,
+            predicateTarget: false,
+            queryTypeTarget: false,
+            typeOperatorTarget: false,
+            referenceTypeArgument: false,
+            restElement: true,
+            tupleElement: false,
+            unionElement: false,
+        };
+
+        return map[context];
+    }
+
+    override toObject(serializer: Serializer): JSONOutput.InferredType {
+        return {
+            type: this.type,
+            name: this.name,
+            constraint: serializer.toObject(this.constraint),
+        };
     }
 }
 
@@ -282,18 +452,56 @@ export class InferredType extends Type {
  * ```ts
  * let value: A & B;
  * ```
+ * @category Types
  */
 export class IntersectionType extends Type {
     override readonly type = "intersection";
 
-    constructor(public types: Type[]) {
+    constructor(public types: SomeType[]) {
         super();
     }
 
-    override toString() {
+    protected override getTypeString() {
         return this.types
-            .map((t) => wrap(t, BINDING_POWERS.intersection))
+            .map((t) => t.stringify(TypeContext.intersectionElement))
             .join(" & ");
+    }
+
+    override needsParenthesis(context: TypeContext): boolean {
+        const map: Record<TypeContext, boolean> = {
+            none: false,
+            templateLiteralElement: false,
+            arrayElement: true,
+            indexedAccessElement: false,
+            conditionalCheck: true,
+            conditionalExtends: false,
+            conditionalTrue: false,
+            conditionalFalse: false,
+            indexedIndex: false,
+            indexedObject: true,
+            inferredConstraint: false,
+            intersectionElement: false,
+            mappedName: false,
+            mappedParameter: false,
+            mappedTemplate: false,
+            optionalElement: true,
+            predicateTarget: false,
+            queryTypeTarget: false,
+            typeOperatorTarget: true,
+            referenceTypeArgument: false,
+            restElement: true,
+            tupleElement: false,
+            unionElement: false,
+        };
+
+        return map[context];
+    }
+
+    override toObject(serializer: Serializer): JSONOutput.IntersectionType {
+        return {
+            type: this.type,
+            types: this.types.map((t) => serializer.toObject(t)),
+        };
     }
 }
 
@@ -303,6 +511,7 @@ export class IntersectionType extends Type {
  * ```ts
  * let value: number;
  * ```
+ * @category Types
  */
 export class IntrinsicType extends Type {
     override readonly type = "intrinsic";
@@ -311,8 +520,19 @@ export class IntrinsicType extends Type {
         super();
     }
 
-    override toString() {
+    protected override getTypeString() {
         return this.name;
+    }
+
+    override toObject(): JSONOutput.IntrinsicType {
+        return {
+            type: this.type,
+            name: this.name,
+        };
+    }
+
+    override needsParenthesis(): boolean {
+        return false;
     }
 }
 
@@ -323,6 +543,7 @@ export class IntrinsicType extends Type {
  * type A = "A"
  * type B = 1
  * ```
+ * @category Types
  */
 export class LiteralType extends Type {
     override readonly type = "literal";
@@ -334,11 +555,32 @@ export class LiteralType extends Type {
     /**
      * Return a string representation of this type.
      */
-    override toString(): string {
+    protected override getTypeString(): string {
         if (typeof this.value === "bigint") {
             return this.value.toString() + "n";
         }
         return JSON.stringify(this.value);
+    }
+
+    override needsParenthesis(): boolean {
+        return false;
+    }
+
+    override toObject(): JSONOutput.LiteralType {
+        if (typeof this.value === "bigint") {
+            return {
+                type: this.type,
+                value: {
+                    value: this.value.toString().replace("-", ""),
+                    negative: this.value < BigInt("0"),
+                },
+            };
+        }
+
+        return {
+            type: this.type,
+            value: this.value,
+        };
     }
 }
 
@@ -346,24 +588,25 @@ export class LiteralType extends Type {
  * Represents a mapped type.
  *
  * ```ts
- * { -readonly [K in keyof U & string as `a${K}`]?: Foo }
+ * { -readonly [K in Parameter as Name]?: Template }
  * ```
+ * @category Types
  */
 export class MappedType extends Type {
     override readonly type = "mapped";
 
     constructor(
         public parameter: string,
-        public parameterType: Type,
-        public templateType: Type,
+        public parameterType: SomeType,
+        public templateType: SomeType,
         public readonlyModifier?: "+" | "-",
         public optionalModifier?: "+" | "-",
-        public nameType?: Type
+        public nameType?: SomeType,
     ) {
         super();
     }
 
-    override toString(): string {
+    protected override getTypeString(): string {
         const read = {
             "+": "readonly ",
             "-": "-readonly ",
@@ -376,9 +619,43 @@ export class MappedType extends Type {
             "": "",
         }[this.optionalModifier ?? ""];
 
-        const name = this.nameType ? ` as ${this.nameType}` : "";
+        const parts = [
+            "{ ",
+            read,
+            "[",
+            this.parameter,
+            " in ",
+            this.parameterType.stringify(TypeContext.mappedParameter),
+        ];
 
-        return `{ ${read}[${this.parameter} in ${this.parameterType}${name}]${opt}: ${this.templateType} }`;
+        if (this.nameType) {
+            parts.push(" as ", this.nameType.stringify(TypeContext.mappedName));
+        }
+
+        parts.push(
+            "]",
+            opt,
+            ": ",
+            this.templateType.stringify(TypeContext.mappedTemplate),
+            " }",
+        );
+        return parts.join("");
+    }
+
+    override needsParenthesis(): boolean {
+        return false;
+    }
+
+    override toObject(serializer: Serializer): JSONOutput.MappedType {
+        return {
+            type: this.type,
+            parameter: this.parameter,
+            parameterType: serializer.toObject(this.parameterType),
+            templateType: serializer.toObject(this.templateType),
+            readonlyModifier: this.readonlyModifier,
+            optionalModifier: this.optionalModifier,
+            nameType: serializer.toObject(this.nameType),
+        };
     }
 }
 
@@ -388,19 +665,28 @@ export class MappedType extends Type {
  * type Z = [1, 2?]
  * //           ^^
  * ```
+ * @category Types
  */
 export class OptionalType extends Type {
     override readonly type = "optional";
 
-    elementType: Type;
-
-    constructor(elementType: Type) {
+    constructor(public elementType: SomeType) {
         super();
-        this.elementType = elementType;
     }
 
-    override toString() {
-        return wrap(this.elementType, BINDING_POWERS.optional) + "?";
+    protected override getTypeString() {
+        return this.elementType.stringify(TypeContext.optionalElement) + "?";
+    }
+
+    override needsParenthesis(): boolean {
+        return false;
+    }
+
+    override toObject(serializer: Serializer): JSONOutput.OptionalType {
+        return {
+            type: this.type,
+            elementType: serializer.toObject(this.elementType),
+        };
     }
 }
 
@@ -408,51 +694,58 @@ export class OptionalType extends Type {
  * Represents a type predicate.
  *
  * ```ts
- * function isString(anything: any): anything is string {}
+ * function isString(x: unknown): x is string {}
  * function assert(condition: boolean): asserts condition {}
  * ```
+ * @category Types
  */
 export class PredicateType extends Type {
     override readonly type = "predicate";
 
     /**
-     * The type that the identifier is tested to be.
-     * May be undefined if the type is of the form `asserts val`.
-     * Will be defined if the type is of the form `asserts val is string` or `val is string`.
-     */
-    targetType?: Type;
-
-    /**
-     * The identifier name which is tested by the predicate.
-     */
-    name: string;
-
-    /**
-     * True if the type is of the form `asserts val is string`, false if
-     * the type is of the form `val is string`
-     */
-    asserts: boolean;
-
-    /**
      * Create a new PredicateType instance.
+     *
+     * @param name The identifier name which is tested by the predicate.
+     * @param asserts True if the type is of the form `asserts val is string`,
+     *                false if the type is of the form `val is string`
+     * @param targetType The type that the identifier is tested to be.
+     *                   May be undefined if the type is of the form `asserts val`.
+     *                   Will be defined if the type is of the form `asserts val is string` or `val is string`.
      */
-    constructor(name: string, asserts: boolean, targetType?: Type) {
+    constructor(
+        public name: string,
+        public asserts: boolean,
+        public targetType?: SomeType,
+    ) {
         super();
-        this.name = name;
-        this.asserts = asserts;
-        this.targetType = targetType;
     }
 
     /**
      * Return a string representation of this type.
      */
-    override toString() {
+    protected override getTypeString() {
         const out = this.asserts ? ["asserts", this.name] : [this.name];
         if (this.targetType) {
-            out.push("is", this.targetType.toString());
+            out.push(
+                "is",
+                this.targetType.stringify(TypeContext.predicateTarget),
+            );
         }
 
         return out.join(" ");
+    }
+
+    override needsParenthesis(): boolean {
+        return false;
+    }
+
+    override toObject(serializer: Serializer): JSONOutput.PredicateType {
+        return {
+            type: this.type,
+            name: this.name,
+            asserts: this.asserts,
+            targetType: serializer.toObject(this.targetType),
+        };
     }
 }
 
@@ -462,19 +755,36 @@ export class PredicateType extends Type {
  * const x = 1
  * type Z = typeof x // query on reflection for x
  * ```
+ * @category Types
  */
 export class QueryType extends Type {
-    readonly queryType: ReferenceType;
-
     override readonly type = "query";
 
-    constructor(reference: ReferenceType) {
+    constructor(public queryType: ReferenceType) {
         super();
-        this.queryType = reference;
     }
 
-    override toString() {
-        return `typeof ${this.queryType.toString()}`;
+    protected override getTypeString() {
+        return `typeof ${this.queryType.stringify(
+            TypeContext.queryTypeTarget,
+        )}`;
+    }
+
+    /**
+     * @privateRemarks
+     * An argument could be made that this ought to return true for indexedObject
+     * since precedence is different than on the value side... if someone really cares
+     * they can easily use a custom theme to change this.
+     */
+    override needsParenthesis(): boolean {
+        return false;
+    }
+
+    override toObject(serializer: Serializer): JSONOutput.QueryType {
+        return {
+            type: this.type,
+            queryType: serializer.toObject(this.queryType),
+        };
     }
 }
 
@@ -484,6 +794,7 @@ export class QueryType extends Type {
  * ```ts
  * let value: MyClass<T>;
  * ```
+ * @category Types
  */
 export class ReferenceType extends Type {
     override readonly type = "reference";
@@ -491,7 +802,7 @@ export class ReferenceType extends Type {
     /**
      * The name of the referenced type.
      *
-     * If the symbol cannot be found cause it's not part of the documentation this
+     * If the symbol cannot be found because it's not part of the documentation this
      * can be used to represent the type.
      */
     name: string;
@@ -499,7 +810,7 @@ export class ReferenceType extends Type {
     /**
      * The type arguments of this reference.
      */
-    typeArguments?: Type[];
+    typeArguments?: SomeType[];
 
     /**
      * The resolved reflection.
@@ -508,121 +819,282 @@ export class ReferenceType extends Type {
         if (typeof this._target === "number") {
             return this._project?.getReflectionById(this._target);
         }
-        const resolved = this._project?.getReflectionFromSymbol(this._target);
-        if (resolved) this._target = resolved.id;
+        const resolvePotential = this._project?.getReflectionsFromSymbolId(
+            this._target,
+        );
+        if (!resolvePotential?.length) {
+            return;
+        }
+
+        const kind = this.preferValues
+            ? ReflectionKind.ValueReferenceTarget
+            : ReflectionKind.TypeReferenceTarget;
+
+        const resolved =
+            resolvePotential.find((refl) => refl.kindOf(kind)) ||
+            resolvePotential.find((refl) => refl.kindOf(~kind))!;
+
+        // Do not mark the type as resolved at this point so that if it
+        // points to a member which is removed (e.g. by typedoc-plugin-zod)
+        // and then replaced it still ends up pointing at the right reflection.
+        // We will lock type reference resolution when serializing to JSON.
+        // this._target = resolved.id;
+
         return resolved;
     }
 
     /**
-     * Don't use this if at all possible. It will eventually go away since models may not
-     * retain information from the original TS objects to enable documentation generation from
-     * previously generated JSON.
-     * @internal
+     * Sometimes a few properties are more important than the rest
+     * of the properties within a type. This occurs most often with
+     * object parameters, where users want to specify `@param foo.bar`
+     * to highlight something about the `bar` property.
+     *
+     * Does NOT support nested properties.
      */
-    getSymbol(): ts.Symbol | undefined {
-        if (typeof this._target === "number") {
-            return;
+    highlightedProperties?: Map<string, CommentDisplayPart[]>;
+
+    /**
+     * If not resolved, the symbol id of the reflection, otherwise undefined.
+     */
+    get symbolId(): ReflectionSymbolId | undefined {
+        if (!this.reflection && typeof this._target === "object") {
+            return this._target;
         }
-        return this._target;
+    }
+
+    /**
+     * Checks if this type is a reference type because it uses a name, but is intentionally not pointing
+     * to a reflection. This happens for type parameters and when representing a mapped type.
+     */
+    isIntentionallyBroken(): boolean {
+        if (
+            typeof this._target === "object" &&
+            this._project?.symbolIdHasBeenRemoved(this._target)
+        ) {
+            return true;
+        }
+        return this._target === -1 || this.refersToTypeParameter;
+    }
+
+    /**
+     * Convert this reference type to a declaration reference used for resolution of external types.
+     */
+    toDeclarationReference(): DeclarationReference {
+        return {
+            resolutionStart: "global",
+            moduleSource: this.package,
+            symbolReference: {
+                path: this.qualifiedName
+                    .split(".")
+                    .map((p) => ({ path: p, navigation: "." })),
+            },
+        };
     }
 
     /**
      * The fully qualified name of the referenced type, relative to the file it is defined in.
      * This will usually be the same as `name`, unless namespaces are used.
-     * Will only be set for `ReferenceType`s pointing to a symbol within `node_modules`.
      */
-    qualifiedName?: string;
+    qualifiedName: string;
 
     /**
      * The package that this type is referencing.
-     * Will only be set for `ReferenceType`s pointing to a symbol within `node_modules`.
      */
     package?: string;
 
-    private _target: ts.Symbol | number;
+    /**
+     * If this reference type refers to a reflection defined by a project not being rendered,
+     * points to the url that this type should be linked to.
+     */
+    externalUrl?: string;
+
+    /**
+     * If set, no warnings about something not being exported should be created
+     * since this may be referring to a type created with `infer X` which will not
+     * be registered on the project.
+     */
+    refersToTypeParameter = false;
+
+    /**
+     * If set, will prefer reflections with {@link ReflectionKind | ReflectionKinds} which represent
+     * values rather than those which represent types.
+     */
+    preferValues = false;
+
+    private _target: ReflectionSymbolId | number;
     private _project: ProjectReflection | null;
 
     private constructor(
         name: string,
-        target: ts.Symbol | Reflection | number,
-        project: ProjectReflection | null
+        target: ReflectionSymbolId | Reflection | number,
+        project: ProjectReflection | null,
+        qualifiedName: string,
     ) {
         super();
         this.name = name;
-        this._target = target instanceof Reflection ? target.id : target;
+        if (typeof target === "number") {
+            this._target = target;
+        } else {
+            this._target = "variant" in target ? target.id : target;
+        }
         this._project = project;
+        this.qualifiedName = qualifiedName;
     }
 
     static createResolvedReference(
         name: string,
         target: Reflection | number,
-        project: ProjectReflection | null
+        project: ProjectReflection | null,
     ) {
-        return new ReferenceType(name, target, project);
+        return new ReferenceType(name, target, project, name);
     }
 
     static createSymbolReference(
         symbol: ts.Symbol,
         context: Context,
-        name?: string
+        name?: string,
     ) {
         const ref = new ReferenceType(
             name ?? symbol.name,
-            symbol,
-            context.project
+            new ReflectionSymbolId(symbol),
+            context.project,
+            getQualifiedName(symbol, name ?? symbol.name),
+        );
+        ref.refersToTypeParameter = !!(
+            symbol.flags & ts.SymbolFlags.TypeParameter
         );
 
-        const symbolPath = symbol?.declarations?.[0]
+        const symbolPath = symbol.declarations?.[0]
             ?.getSourceFile()
             .fileName.replace(/\\/g, "/");
         if (!symbolPath) return ref;
 
-        let startIndex = symbolPath.indexOf("node_modules/");
-        if (startIndex === -1) return ref;
-        startIndex += "node_modules/".length;
-        let stopIndex = symbolPath.indexOf("/", startIndex);
-        // Scoped package, e.g. `@types/node`
-        if (symbolPath[startIndex] === "@") {
-            stopIndex = symbolPath.indexOf("/", stopIndex + 1);
-        }
-
-        const packageName = symbolPath.substring(startIndex, stopIndex);
-        ref.package = packageName;
-
-        const qualifiedName = context.checker.getFullyQualifiedName(symbol);
-        // I think this is less bad than depending on symbol.parent...
-        // https://github.com/microsoft/TypeScript/issues/38344
-        // It will break if someone names a directory with a quote in it, but so will lots
-        // of other things including other parts of TypeDoc. Until it *actually* breaks someone...
-        if (qualifiedName.startsWith('"')) {
-            ref.qualifiedName = qualifiedName.substring(
-                qualifiedName.indexOf('".', 1) + 2
-            );
-        } else {
-            ref.qualifiedName = qualifiedName;
-        }
-
+        ref.package = findPackageForPath(symbolPath);
         return ref;
     }
 
-    /** @internal this is used for type parameters, which don't actually point to something */
+    /**
+     * This is used for type parameters, which don't actually point to something,
+     * and also for temporary references which will be cleaned up with real references
+     * later during conversion.
+     * @internal
+     */
     static createBrokenReference(name: string, project: ProjectReflection) {
-        return new ReferenceType(name, -1, project);
+        return new ReferenceType(name, -1, project, name);
     }
 
-    override toString() {
+    protected override getTypeString() {
         const name = this.reflection ? this.reflection.name : this.name;
         let typeArgs = "";
 
         if (this.typeArguments && this.typeArguments.length > 0) {
             typeArgs += "<";
             typeArgs += this.typeArguments
-                .map((arg) => arg.toString())
+                .map((arg) => arg.stringify(TypeContext.referenceTypeArgument))
                 .join(", ");
             typeArgs += ">";
         }
 
         return name + typeArgs;
+    }
+
+    override needsParenthesis(): boolean {
+        return false;
+    }
+
+    override toObject(serializer: Serializer): JSONOutput.ReferenceType {
+        let target: JSONOutput.ReferenceType["target"];
+        if (typeof this._target === "number") {
+            target = this._target;
+        } else if (this._project?.symbolIdHasBeenRemoved(this._target)) {
+            target = -1;
+        } else if (this.reflection) {
+            target = this.reflection.id;
+        } else {
+            target = this._target.toObject(serializer);
+        }
+
+        const result: JSONOutput.ReferenceType = {
+            type: this.type,
+            target,
+            typeArguments: serializer.toObjectsOptional(this.typeArguments),
+            name: this.name,
+            package: this.package,
+            externalUrl: this.externalUrl,
+        };
+
+        if (this.name !== this.qualifiedName) {
+            result.qualifiedName = this.qualifiedName;
+        }
+
+        if (this.refersToTypeParameter) {
+            result.refersToTypeParameter = true;
+        }
+
+        if (typeof target !== "number" && this.preferValues) {
+            result.preferValues = true;
+        }
+
+        if (this.highlightedProperties) {
+            result.highlightedProperties = Object.fromEntries(
+                Array.from(
+                    this.highlightedProperties.entries(),
+                    ([key, parts]) => {
+                        return [
+                            key,
+                            Comment.serializeDisplayParts(serializer, parts),
+                        ];
+                    },
+                ),
+            );
+        }
+
+        return result;
+    }
+
+    override fromObject(de: Deserializer, obj: JSONOutput.ReferenceType): void {
+        this.typeArguments = de.reviveMany(obj.typeArguments, (t) =>
+            de.constructType(t),
+        );
+        if (typeof obj.target === "number" && obj.target !== -1) {
+            de.defer((project) => {
+                const target = project.getReflectionById(
+                    de.oldIdToNewId[obj.target as number] ?? -1,
+                );
+                if (target) {
+                    this._project = project;
+                    this._target = target.id;
+                } else {
+                    de.logger.warn(
+                        de.application.i18n.serialized_project_referenced_0_not_part_of_project(
+                            JSON.stringify(obj.target),
+                        ),
+                    );
+                }
+            });
+        } else if (obj.target === -1) {
+            this._target = -1;
+        } else {
+            this._project = de.project!;
+            this._target = new ReflectionSymbolId(obj.target);
+        }
+
+        this.qualifiedName = obj.qualifiedName ?? obj.name;
+        this.package = obj.package;
+        this.refersToTypeParameter = !!obj.refersToTypeParameter;
+        this.preferValues = !!obj.preferValues;
+
+        if (obj.highlightedProperties) {
+            this.highlightedProperties = new Map();
+            for (const [key, parts] of Object.entries(
+                obj.highlightedProperties,
+            )) {
+                this.highlightedProperties.set(
+                    key,
+                    Comment.deserializeDisplayParts(de, parts),
+                );
+            }
+        }
     }
 }
 
@@ -635,23 +1107,49 @@ export class ReferenceType extends Type {
  * ```ts
  * let value: { a: string, b: number };
  * ```
+ * @category Types
  */
 export class ReflectionType extends Type {
     override readonly type = "reflection";
 
-    declaration: DeclarationReflection;
-
-    constructor(declaration: DeclarationReflection) {
+    constructor(public declaration: DeclarationReflection) {
         super();
-        this.declaration = declaration;
     }
 
-    override toString() {
-        if (!this.declaration.children && this.declaration.signatures) {
-            return "Function";
-        } else {
-            return "Object";
+    protected override getTypeString() {
+        const parts: string[] = [];
+        const sigs = this.declaration.getAllSignatures();
+        for (const sig of sigs) {
+            parts.push(sigStr(sig, ": "));
         }
+
+        if (this.declaration.children) {
+            for (const p of this.declaration.children) {
+                parts.push(`${p.name}${propertySep(p)} ${typeStr(p.type)}`);
+            }
+            return `{ ${parts.join("; ")} }`;
+        }
+
+        if (sigs.length === 1) {
+            return sigStr(sigs[0], " => ");
+        }
+
+        if (parts.length === 0) {
+            return "{}";
+        }
+
+        return `{ ${parts.join("; ")} }`;
+    }
+
+    override needsParenthesis(): boolean {
+        return false;
+    }
+
+    override toObject(serializer: Serializer): JSONOutput.ReflectionType {
+        return {
+            type: this.type,
+            declaration: serializer.toObject(this.declaration),
+        };
     }
 }
 
@@ -661,16 +1159,28 @@ export class ReflectionType extends Type {
  * type Z = [1, ...2[]]
  * //           ^^^^^^
  * ```
+ * @category Types
  */
 export class RestType extends Type {
     override readonly type = "rest";
 
-    constructor(public elementType: Type) {
+    constructor(public elementType: SomeType) {
         super();
     }
 
-    override toString() {
-        return `...${wrap(this.elementType, BINDING_POWERS.rest)}`;
+    protected override getTypeString() {
+        return `...${this.elementType.stringify(TypeContext.restElement)}`;
+    }
+
+    override needsParenthesis(): boolean {
+        return false;
+    }
+
+    override toObject(serializer: Serializer): JSONOutput.RestType {
+        return {
+            type: this.type,
+            elementType: serializer.toObject(this.elementType),
+        };
     }
 }
 
@@ -679,23 +1189,47 @@ export class RestType extends Type {
  * ```ts
  * type Z = `${'a' | 'b'}${'a' | 'b'}`
  * ```
+ * @category Types
  */
 export class TemplateLiteralType extends Type {
-    override readonly type = "template-literal";
+    override readonly type = "templateLiteral";
 
-    constructor(public head: string, public tail: [Type, string][]) {
+    constructor(
+        public head: string,
+        public tail: [SomeType, string][],
+    ) {
         super();
     }
 
-    override toString() {
+    protected override getTypeString() {
         return [
             "`",
             this.head,
             ...this.tail.map(([type, text]) => {
-                return "${" + type + "}" + text;
+                return (
+                    "${" +
+                    type.stringify(TypeContext.templateLiteralElement) +
+                    "}" +
+                    text
+                );
             }),
             "`",
         ].join("");
+    }
+
+    override needsParenthesis(): boolean {
+        return false;
+    }
+
+    override toObject(serializer: Serializer): JSONOutput.TemplateLiteralType {
+        return {
+            type: this.type,
+            head: this.head,
+            tail: this.tail.map(([type, text]) => [
+                serializer.toObject(type),
+                text,
+            ]),
+        };
     }
 }
 
@@ -705,22 +1239,37 @@ export class TemplateLiteralType extends Type {
  * ```ts
  * let value: [string, boolean];
  * ```
+ * @category Types
  */
 export class TupleType extends Type {
     override readonly type = "tuple";
 
     /**
-     * The ordered type elements of the tuple type.
+     * @param elements The ordered type elements of the tuple type.
      */
-    elements: Type[];
-
-    constructor(elements: Type[]) {
+    constructor(public elements: SomeType[]) {
         super();
-        this.elements = elements;
     }
 
-    override toString() {
-        return "[" + this.elements.join(", ") + "]";
+    protected override getTypeString() {
+        return (
+            "[" +
+            this.elements
+                .map((t) => t.stringify(TypeContext.tupleElement))
+                .join(", ") +
+            "]"
+        );
+    }
+
+    override needsParenthesis(): boolean {
+        return false;
+    }
+
+    override toObject(serializer: Serializer): JSONOutput.TupleType {
+        return {
+            type: this.type,
+            elements: serializer.toObjectsOptional(this.elements),
+        };
     }
 }
 
@@ -730,14 +1279,15 @@ export class TupleType extends Type {
  * ```ts
  * let value: [name: string];
  * ```
+ * @category Types
  */
 export class NamedTupleMember extends Type {
-    override readonly type = "named-tuple-member";
+    override readonly type = "namedTupleMember";
 
     constructor(
         public name: string,
         public isOptional: boolean,
-        public element: Type
+        public element: SomeType,
     ) {
         super();
     }
@@ -745,8 +1295,23 @@ export class NamedTupleMember extends Type {
     /**
      * Return a string representation of this type.
      */
-    override toString() {
-        return `${this.name}${this.isOptional ? "?" : ""}: ${this.element}`;
+    protected override getTypeString() {
+        return `${this.name}${
+            this.isOptional ? "?" : ""
+        }: ${this.element.stringify(TypeContext.tupleElement)}`;
+    }
+
+    override needsParenthesis(): boolean {
+        return false;
+    }
+
+    override toObject(serializer: Serializer): JSONOutput.NamedTupleMemberType {
+        return {
+            type: this.type,
+            name: this.name,
+            isOptional: this.isOptional,
+            element: serializer.toObject(this.element),
+        };
     }
 }
 
@@ -757,19 +1322,60 @@ export class NamedTupleMember extends Type {
  * class A {}
  * class B<T extends keyof A> {}
  * ```
+ * @category Types
  */
 export class TypeOperatorType extends Type {
     override readonly type = "typeOperator";
 
     constructor(
-        public target: Type,
-        public operator: "keyof" | "unique" | "readonly"
+        public target: SomeType,
+        public operator: "keyof" | "unique" | "readonly",
     ) {
         super();
     }
 
-    override toString() {
-        return `${this.operator} ${this.target.toString()}`;
+    protected override getTypeString() {
+        return `${this.operator} ${this.target.stringify(
+            TypeContext.typeOperatorTarget,
+        )}`;
+    }
+
+    override needsParenthesis(context: TypeContext): boolean {
+        const map: Record<TypeContext, boolean> = {
+            none: false,
+            templateLiteralElement: false,
+            arrayElement: true,
+            indexedAccessElement: false,
+            conditionalCheck: false,
+            conditionalExtends: false,
+            conditionalTrue: false,
+            conditionalFalse: false,
+            indexedIndex: false,
+            indexedObject: true,
+            inferredConstraint: false,
+            intersectionElement: false,
+            mappedName: false,
+            mappedParameter: false,
+            mappedTemplate: false,
+            optionalElement: true,
+            predicateTarget: false,
+            queryTypeTarget: false,
+            typeOperatorTarget: false,
+            referenceTypeArgument: false,
+            restElement: false,
+            tupleElement: false,
+            unionElement: false,
+        };
+
+        return map[context];
+    }
+
+    override toObject(serializer: Serializer): JSONOutput.TypeOperatorType {
+        return {
+            type: this.type,
+            operator: this.operator,
+            target: serializer.toObject(this.target),
+        };
     }
 }
 
@@ -779,40 +1385,81 @@ export class TypeOperatorType extends Type {
  * ```ts
  * let value: string | string[];
  * ```
+ * @category Types
  */
 export class UnionType extends Type {
     override readonly type = "union";
 
+    /**
+     * If present, there should be as many items in this array as there are items in the {@link types} array.
+     *
+     * This member is only valid on unions which are on {@link DeclarationReflection.type | DeclarationReflection.type} with a
+     * {@link ReflectionKind} `kind` of `TypeAlias`. Specifying it on any other union is undefined behavior.
+     */
+    elementSummaries?: CommentDisplayPart[][];
+
     constructor(public types: SomeType[]) {
         super();
-        this.normalize();
     }
 
-    override toString(): string {
-        return this.types.map((t) => wrap(t, BINDING_POWERS.union)).join(" | ");
+    protected override getTypeString(): string {
+        return this.types
+            .map((t) => t.stringify(TypeContext.unionElement))
+            .join(" | ");
     }
 
-    private normalize() {
-        const trueIndex = this.types.findIndex(
-            (t) => t instanceof LiteralType && t.value === true
-        );
-        const falseIndex = this.types.findIndex(
-            (t) => t instanceof LiteralType && t.value === false
-        );
+    override needsParenthesis(context: TypeContext): boolean {
+        const map: Record<TypeContext, boolean> = {
+            none: false,
+            templateLiteralElement: false,
+            arrayElement: true,
+            indexedAccessElement: false,
+            conditionalCheck: true,
+            conditionalExtends: false,
+            conditionalTrue: false,
+            conditionalFalse: false,
+            indexedIndex: false,
+            indexedObject: true,
+            inferredConstraint: false,
+            intersectionElement: true,
+            mappedName: false,
+            mappedParameter: false,
+            mappedTemplate: false,
+            optionalElement: true,
+            predicateTarget: false,
+            queryTypeTarget: false,
+            typeOperatorTarget: true,
+            referenceTypeArgument: false,
+            restElement: false,
+            tupleElement: false,
+            unionElement: false,
+        };
 
-        if (trueIndex !== -1 && falseIndex !== -1) {
-            this.types.splice(Math.max(trueIndex, falseIndex), 1);
-            this.types.splice(
-                Math.min(trueIndex, falseIndex),
-                1,
-                new IntrinsicType("boolean")
+        return map[context];
+    }
+
+    override fromObject(de: Deserializer, obj: JSONOutput.UnionType): void {
+        if (obj.elementSummaries) {
+            this.elementSummaries = obj.elementSummaries.map((parts) =>
+                Comment.deserializeDisplayParts(de, parts),
             );
         }
+    }
+
+    override toObject(serializer: Serializer): JSONOutput.UnionType {
+        return {
+            type: this.type,
+            types: this.types.map((t) => serializer.toObject(t)),
+            elementSummaries: this.elementSummaries?.map((parts) =>
+                Comment.serializeDisplayParts(serializer, parts),
+            ),
+        };
     }
 }
 
 /**
  * Represents all unknown types that cannot be converted by TypeDoc.
+ * @category Types
  */
 export class UnknownType extends Type {
     override readonly type = "unknown";
@@ -827,7 +1474,39 @@ export class UnknownType extends Type {
         this.name = name;
     }
 
-    override toString() {
+    protected override getTypeString() {
         return this.name;
     }
+
+    /**
+     * Always returns true if not at the root level, we have no idea what's in here, so wrap it in parenthesis
+     * to be extra safe.
+     */
+    override needsParenthesis(context: TypeContext): boolean {
+        return context !== TypeContext.none;
+    }
+
+    override toObject(): JSONOutput.UnknownType {
+        return {
+            type: this.type,
+            name: this.name,
+        };
+    }
+}
+
+function propertySep(refl: Reflection) {
+    return refl.flags.isOptional ? "?:" : ":";
+}
+
+function typeStr(type: Type | undefined) {
+    return type?.toString() ?? "any";
+}
+
+function sigStr(sig: SignatureReflection, sep: string) {
+    const params = joinArray(
+        sig.parameters,
+        ", ",
+        (p) => `${p.name}${propertySep(p)} ${typeStr(p.type)}`,
+    );
+    return `(${params})${sep}${typeStr(sig.type)}`;
 }

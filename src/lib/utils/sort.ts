@@ -3,66 +3,90 @@
  * @module
  */
 
-import { ReflectionKind } from "../models/reflections/kind";
-import type { DeclarationReflection } from "../models/reflections/declaration";
+import { ReflectionKind } from "../models/reflections/kind.js";
+import type { DeclarationReflection } from "../models/reflections/declaration.js";
+import type { Options } from "./options/index.js";
+import type { DocumentReflection } from "../models/index.js";
+import * as OptionDefaults from "./options/defaults.js";
 
 export const SORT_STRATEGIES = [
     "source-order",
     "alphabetical",
+    "alphabetical-ignoring-documents",
     "enum-value-ascending",
     "enum-value-descending",
+    "enum-member-source-order",
     "static-first",
     "instance-first",
     "visibility",
     "required-first",
     "kind",
+    "external-last",
+    "documents-first",
+    "documents-last",
 ] as const;
 
-export type SortStrategy = typeof SORT_STRATEGIES[number];
+export type SortStrategy = (typeof SORT_STRATEGIES)[number];
 
 // Return true if a < b
 const sorts: Record<
     SortStrategy,
-    (a: DeclarationReflection, b: DeclarationReflection) => boolean
+    (
+        a: DeclarationReflection | DocumentReflection,
+        b: DeclarationReflection | DocumentReflection,
+        data: { kindSortOrder: ReflectionKind[] },
+    ) => boolean
 > = {
     "source-order"(a, b) {
-        const aSymbol = a.project.getSymbolFromReflection(a);
-        const bSymbol = b.project.getSymbolFromReflection(b);
-
         // This is going to be somewhat ambiguous. No way around that. Treat the first
         // declaration of a symbol as its ordering declaration.
-        const aDecl = aSymbol?.getDeclarations()?.[0];
-        const bDecl = bSymbol?.getDeclarations()?.[0];
+        const aSymbol = a.project.getSymbolIdFromReflection(a);
+        const bSymbol = b.project.getSymbolIdFromReflection(b);
 
-        if (aDecl && bDecl) {
-            const aFile = aDecl.getSourceFile().fileName;
-            const bFile = bDecl.getSourceFile().fileName;
-            if (aFile < bFile) {
+        if (aSymbol && bSymbol) {
+            if (aSymbol.fileName < bSymbol.fileName) {
                 return true;
             }
-            if (aFile == bFile && aDecl.pos < bDecl.pos) {
+            if (
+                aSymbol.fileName === bSymbol.fileName &&
+                aSymbol.pos < bSymbol.pos
+            ) {
                 return true;
             }
 
             return false;
         }
 
-        // Someone is doing something weird. Fail to re-order. This *might* be a bug in TD
-        // but it could also be TS having some exported symbol without a declaration.
+        // Someone is doing something weird. Fail to re-order. This could happen if someone
+        // tries to sort with a reflection that has been removed from the project.
         return false;
     },
     alphabetical(a, b) {
-        return a.name < b.name;
+        return a.name.localeCompare(b.name) < 0;
+    },
+    "alphabetical-ignoring-documents"(a, b) {
+        if (
+            a.kindOf(ReflectionKind.Document) ||
+            b.kindOf(ReflectionKind.Document)
+        ) {
+            return false;
+        }
+        return a.name.localeCompare(b.name) < 0;
     },
     "enum-value-ascending"(a, b) {
         if (
             a.kind == ReflectionKind.EnumMember &&
             b.kind == ReflectionKind.EnumMember
         ) {
-            return (
-                parseFloat(a.defaultValue ?? "0") <
-                parseFloat(b.defaultValue ?? "0")
-            );
+            const aRefl = a as DeclarationReflection;
+            const bRefl = b as DeclarationReflection;
+
+            const aValue =
+                aRefl.type?.type === "literal" ? aRefl.type.value : -Infinity;
+            const bValue =
+                bRefl.type?.type === "literal" ? bRefl.type.value : -Infinity;
+
+            return aValue! < bValue!;
         }
         return false;
     },
@@ -71,10 +95,24 @@ const sorts: Record<
             a.kind == ReflectionKind.EnumMember &&
             b.kind == ReflectionKind.EnumMember
         ) {
-            return (
-                parseFloat(b.defaultValue ?? "0") <
-                parseFloat(a.defaultValue ?? "0")
-            );
+            const aRefl = a as DeclarationReflection;
+            const bRefl = b as DeclarationReflection;
+
+            const aValue =
+                aRefl.type?.type === "literal" ? aRefl.type.value : -Infinity;
+            const bValue =
+                bRefl.type?.type === "literal" ? bRefl.type.value : -Infinity;
+
+            return bValue! < aValue!;
+        }
+        return false;
+    },
+    "enum-member-source-order"(a, b, data) {
+        if (
+            a.kind === ReflectionKind.EnumMember &&
+            b.kind === ReflectionKind.EnumMember
+        ) {
+            return sorts["source-order"](a, b, data);
         }
         return false;
     },
@@ -102,54 +140,53 @@ const sorts: Record<
     "required-first"(a, b) {
         return !a.flags.isOptional && b.flags.isOptional;
     },
-    kind(a, b) {
-        const weights = [
-            ReflectionKind.Reference,
-            ReflectionKind.Project,
-            ReflectionKind.Module,
-            ReflectionKind.Namespace,
-            ReflectionKind.Enum,
-            ReflectionKind.EnumMember,
-            ReflectionKind.Class,
-            ReflectionKind.Interface,
-            ReflectionKind.TypeAlias,
-
-            ReflectionKind.Constructor,
-            ReflectionKind.Event,
-            ReflectionKind.Property,
-            ReflectionKind.Variable,
-            ReflectionKind.Function,
-            ReflectionKind.Accessor,
-            ReflectionKind.Method,
-            ReflectionKind.ObjectLiteral,
-
-            ReflectionKind.Parameter,
-            ReflectionKind.TypeParameter,
-            ReflectionKind.TypeLiteral,
-            ReflectionKind.CallSignature,
-            ReflectionKind.ConstructorSignature,
-            ReflectionKind.IndexSignature,
-            ReflectionKind.GetSignature,
-            ReflectionKind.SetSignature,
-        ] as const;
-
-        return weights.indexOf(a.kind) < weights.indexOf(b.kind);
+    kind(a, b, { kindSortOrder }) {
+        return kindSortOrder.indexOf(a.kind) < kindSortOrder.indexOf(b.kind);
+    },
+    "external-last"(a, b) {
+        return !a.flags.isExternal && b.flags.isExternal;
+    },
+    "documents-first"(a, b) {
+        return (
+            a.kindOf(ReflectionKind.Document) &&
+            !b.kindOf(ReflectionKind.Document)
+        );
+    },
+    "documents-last"(a, b) {
+        return (
+            !a.kindOf(ReflectionKind.Document) &&
+            b.kindOf(ReflectionKind.Document)
+        );
     },
 };
 
-export function sortReflections(
-    strategies: DeclarationReflection[],
-    strats: readonly SortStrategy[]
-) {
-    strategies.sort((a, b) => {
-        for (const s of strats) {
-            if (sorts[s](a, b)) {
-                return -1;
-            }
-            if (sorts[s](b, a)) {
-                return 1;
-            }
+export function getSortFunction(opts: Options) {
+    const kindSortOrder = opts
+        .getValue("kindSortOrder")
+        .map((k) => ReflectionKind[k]);
+
+    for (const kind of OptionDefaults.kindSortOrder) {
+        if (!kindSortOrder.includes(ReflectionKind[kind])) {
+            kindSortOrder.push(ReflectionKind[kind]);
         }
-        return 0;
-    });
+    }
+
+    const strategies = opts.getValue("sort");
+    const data = { kindSortOrder };
+
+    return function sortReflections(
+        reflections: (DeclarationReflection | DocumentReflection)[],
+    ) {
+        reflections.sort((a, b) => {
+            for (const s of strategies) {
+                if (sorts[s](a, b, data)) {
+                    return -1;
+                }
+                if (sorts[s](b, a, data)) {
+                    return 1;
+                }
+            }
+            return 0;
+        });
+    };
 }

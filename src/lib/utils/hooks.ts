@@ -1,8 +1,8 @@
-import { insertOrderSorted } from "./array";
+import { insertOrderSorted } from "./array.js";
 
 const momentos = new WeakMap<
     EventHooksMomento<never, unknown>,
-    Map<any, { listener: Function; once?: boolean; order: number }[]>
+    Map<any, { listener: (..._: any) => any; once?: boolean; order: number }[]>
 >();
 
 type EventHooksMomento<T extends Record<keyof T, unknown[]>, _R> = {
@@ -15,12 +15,7 @@ type EventHooksMomento<T extends Record<keyof T, unknown[]>, _R> = {
  * This is beneficial for the themes since it allows plugins to modify the HTML output
  * without doing unsafe text replacement.
  *
- * This class is functionally nearly identical to the {@link EventEmitter} class with
- * two exceptions.
- * 1. The {@link EventEmitter} class only `await`s return values from its listeners, it
- *    does not return them to the emitter.
- * 2. This class requires listeners to by synchronous, unless `R` is specified as to be
- *    a promise or other deferred type.
+ * Very simple event emitter class which collects the return values of its listeners.
  *
  * @example
  * ```ts
@@ -35,7 +30,7 @@ export class EventHooks<T extends Record<keyof T, unknown[]>, R> {
     // contracts in the methods while not casting everywhere this is used.
     private _listeners = new Map<
         keyof T,
-        { listener: Function; once?: boolean; order: number }[]
+        { listener: (..._: any) => any; once?: boolean; order: number }[]
     >();
 
     /**
@@ -47,7 +42,7 @@ export class EventHooks<T extends Record<keyof T, unknown[]>, R> {
     on<K extends keyof T>(
         event: K,
         listener: (...args: T[K]) => R,
-        order = 0
+        order = 0,
     ): void {
         const list = (this._listeners.get(event) || []).slice();
         insertOrderSorted(list, { listener, order });
@@ -63,7 +58,7 @@ export class EventHooks<T extends Record<keyof T, unknown[]>, R> {
     once<K extends keyof T>(
         event: K,
         listener: (...args: T[K]) => R,
-        order = 0
+        order = 0,
     ): void {
         const list = (this._listeners.get(event) || []).slice();
         insertOrderSorted(list, { listener, once: true, order });
@@ -94,7 +89,7 @@ export class EventHooks<T extends Record<keyof T, unknown[]>, R> {
         const listeners = this._listeners.get(event)?.slice() || [];
         this._listeners.set(
             event,
-            listeners.filter(({ once }) => !once)
+            listeners.filter(({ once }) => !once),
         );
         return listeners.map(({ listener }) => listener(...args));
     }
@@ -103,7 +98,7 @@ export class EventHooks<T extends Record<keyof T, unknown[]>, R> {
         const momento = {} as EventHooksMomento<T, R>;
         const save = new Map<
             keyof T,
-            { listener: Function; once?: boolean; order: number }[]
+            { listener: (..._: any) => any; once?: boolean; order: number }[]
         >();
 
         for (const [key, val] of this._listeners) {

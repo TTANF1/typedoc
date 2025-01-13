@@ -1,0 +1,11 @@
+{
+    "$schema": "https://json.schemastore.org/mocharc.json",
+    "extension": ["ts"],
+    "ignore": ["src/test/slow/**", "src/test/packages/**"],
+    "package": "./package.json",
+    "node-option": ["import=tsx"],
+    "slow": 500,
+    "spec": ["src/**/*.test.ts", "src/**/*.test.tsx"],
+    "timeout": 0,
+    "watch-files": ["src/**/*.ts", "src/**/*.tsx"]
+}

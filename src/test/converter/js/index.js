@@ -47,14 +47,16 @@
 
 /**
  * @callback Foo
- * @param {...string} args
- * @returns {number}
+ * @param {...string} args Foo param description
+ * @returns {number} Foo return description
  */
 
 /** @type {Foo} */
 export const usedFoo = () => 1;
 
-/** @enum {string} */
+/**
+ * @enum {string} enum comment
+ */
 export const ColumnType = {
     STRING: "string",
     NUMBER: "number",

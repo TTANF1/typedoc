@@ -1,7 +1,8 @@
 import { ok } from "assert";
-import type { OptionsReader, Options } from "..";
-import type { Logger } from "../../loggers";
-import { ParameterType } from "../declaration";
+import type { OptionsReader, Options } from "../index.js";
+import type { Logger } from "../../loggers.js";
+import { ParameterType } from "../declaration.js";
+import type { TranslatedString } from "../../../internationalization/internationalization.js";
 
 const ARRAY_OPTION_TYPES = new Set<ParameterType | undefined>([
     ParameterType.Array,
@@ -15,11 +16,12 @@ const ARRAY_OPTION_TYPES = new Set<ParameterType | undefined>([
  */
 export class ArgumentsReader implements OptionsReader {
     readonly name = "arguments";
-    readonly priority: number;
+    readonly order: number;
+    readonly supportsPackages = false;
     private args: string[];
 
     constructor(priority: number, args = process.argv.slice(2)) {
-        this.priority = priority;
+        this.order = priority;
         this.args = args;
     }
 
@@ -37,7 +39,7 @@ export class ArgumentsReader implements OptionsReader {
                 options.setValue(name, value);
             } catch (err) {
                 ok(err instanceof Error);
-                logger.error(err.message);
+                logger.error(err.message as TranslatedString);
             }
         };
 
@@ -48,12 +50,21 @@ export class ArgumentsReader implements OptionsReader {
                 : options.getDeclaration("entryPoints");
 
             if (decl) {
+                if (decl.configFileOnly) {
+                    logger.error(
+                        logger.i18n.option_0_can_only_be_specified_by_config_file(
+                            decl.name,
+                        ),
+                    );
+                    continue;
+                }
+
                 if (seen.has(decl.name) && ARRAY_OPTION_TYPES.has(decl.type)) {
                     trySet(
                         decl.name,
                         (options.getValue(decl.name) as string[]).concat(
-                            this.args[index]
-                        )
+                            this.args[index],
+                        ),
                     );
                 } else if (
                     decl.type === ParameterType.Boolean ||
@@ -72,7 +83,9 @@ export class ArgumentsReader implements OptionsReader {
                     if (index === this.args.length) {
                         // Only boolean values have optional values.
                         logger.warn(
-                            `--${decl.name} expected a value, but none was given as an argument`
+                            logger.i18n.option_0_expected_a_value_but_none_provided(
+                                decl.name,
+                            ),
                         );
                     }
                     trySet(decl.name, this.args[index]);
@@ -103,7 +116,12 @@ export class ArgumentsReader implements OptionsReader {
                 }
             }
 
-            logger.error(`Unknown option: ${name}`);
+            logger.error(
+                logger.i18n.unknown_option_0_may_have_meant_1(
+                    name,
+                    options.getSimilarOptions(name).join("\n\t"),
+                ),
+            );
             index++;
         }
     }
